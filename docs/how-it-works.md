@@ -28,6 +28,7 @@ headings as a reference.
   - [5.16 Containers and Compose](#516-containers-and-compose)
   - [5.17 Testing strategy](#517-testing-strategy)
   - [5.18 MCP: exposing retrieval to AI applications](#518-mcp-exposing-retrieval-to-ai-applications)
+  - [5.19 The web app: backend-for-frontend, sessions and CSRF](#519-the-web-app-backend-for-frontend-sessions-and-csrf)
 - [6. Bugs found while building it](#6-bugs-found-while-building-it)
 - [7. Tradeoffs and what changes at scale](#7-tradeoffs-and-what-changes-at-scale)
 - [8. Questions this design should be able to answer](#8-questions-this-design-should-be-able-to-answer)
@@ -657,6 +658,31 @@ discover and call this system without custom integration code. Full guide: [mcp.
 - **Security:** tool results are an indirect prompt-injection channel. Excerpts are delimited and
   labelled untrusted, and every tool is read-only.
 
+### 5.19 The web app: backend-for-frontend, sessions and CSRF
+
+Full guide: [web.md](web.md). The concepts:
+
+- **"Uploading trains the model"** is the common misconception: it *indexes* documents for
+  retrieval, and the model's weights never change.
+- **Backend-for-frontend:** the SPA talks only to its own server, which authenticates people and
+  calls the API with its own client credentials. The browser holds just an HttpOnly session cookie:
+  no tokens for XSS to steal, no secrets in the bundle.
+- **Server-side sessions vs JWTs in the browser:** a session is revoked the moment you delete it
+  (logout, account disabled); a JWT stays valid until it expires. The cost is shared state (Redis).
+  Session ids are random 256-bit values, and only their hashes are stored.
+- **Session fixation:** always issue a new session id at login, so an attacker can't plant a known id.
+- **CSRF:** cookies are sent automatically, so writes need proof the request came from our page:
+  SameSite=Lax cookies, an Origin check, and a synchronizer token the page must echo in a header.
+  Login gets an Origin check too (login CSRF).
+- **Least privilege across a hop:** role checks in the BFF, *and* a chat user's API calls carry a
+  query-only token, so a missing route check still can't produce a write.
+- **Passwords:** argon2id (memory-hard), a length-based policy (NIST 800-63B), dummy-hash timing
+  equalization, rate-limited login, and one generic error message.
+- **Untrusted output in the UI:** model output is rendered as React elements, never as HTML, and a
+  strict CSP blocks inline and third-party scripts as a second line of defense.
+- **Streaming in the browser:** EventSource can't POST or send headers, so the SPA parses SSE from a
+  `fetch` stream, buffering partial messages and decoding UTF-8 in streaming mode.
+
 ## 6. Bugs found while building it
 
 These make good stories because each one was silent: nothing crashed.
@@ -672,7 +698,10 @@ These make good stories because each one was silent: nothing crashed.
    with a higher weight (migration 002).
 4. **Silent prompt truncation (prevented).** Ollama's default context window would have silently
    cut the start of long prompts: the system prompt. Fix: raise it and cap the prompt budget.
-5. **Model supply chain.** The network blocks Hugging Face, so the planned sentence-transformers
+5. **An effect returning a Promise crashed the React app.** An expression-bodied `useEffect` returned
+   `scrollIntoView`'s result, which current Chrome makes a Promise; React called it as a cleanup
+   function and crashed. Only testing in a real browser caught it.
+6. **Model supply chain.** The network blocks Hugging Face, so the planned sentence-transformers
    models couldn't be downloaded. The embedding layer already sat behind a provider interface,
    so switching to Ollama-served models was a configuration change.
 
@@ -763,6 +792,16 @@ token endpoint. The token is requested for the MCP resource and bound to it by a
 **What is token passthrough and why is it forbidden?** Forwarding the token you received to another
 service. The downstream service can't tell who it's really acting for, and audience checks stop
 meaning anything: a confused deputy. Each hop should authenticate as itself (or use token exchange).
+
+**Why a BFF instead of storing a JWT in the browser?** Tokens readable by JavaScript can be stolen
+by any XSS bug and can't be revoked before expiry. An HttpOnly session cookie isn't readable by
+scripts, and server-side sessions are revocable instantly. The BFF also keeps client secrets off the client.
+
+**How does the app prevent CSRF?** SameSite=Lax cookies, an Origin check on every write (and on
+login), and a per-session token the page sends in a header, which a cross-site attacker can't read.
+
+**If the frontend hides the Admin tab, is that security?** No, that's UX. The server checks the
+role on every admin route, and chat users' API tokens can't write at all.
 
 **What's the weakest part of this system?** Generation speed on CPU, and a small evaluation set
 written from the documents themselves (it favours keyword search). Next steps: a paraphrased

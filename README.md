@@ -10,7 +10,9 @@ question ─► embed ─┬─► pgvector HNSW search ──┐
                    └─► Postgres full-text ────┴─► RRF fusion ─► prompt with numbered sources ─► LLM ─► answer [1][2]
 ```
 
-**Stack:** TypeScript/Fastify API · Python/FastAPI ingestion service · PostgreSQL 17 + pgvector ·
+![Chat UI](docs/images/chat.png)
+
+**Stack:** React + Vite web app with a Fastify backend-for-frontend · TypeScript/Fastify API · Python/FastAPI ingestion service · PostgreSQL 17 + pgvector ·
 Redis · Ollama (`qwen2.5:7b` for answers, `nomic-embed-text` for embeddings) · Docker Compose
 
 ## Highlights
@@ -29,6 +31,10 @@ Redis · Ollama (`qwen2.5:7b` for answers, `nomic-embed-text` for embeddings) ·
 - **Streaming:** answers stream over Server-Sent Events; client disconnects abort generation.
 - **Observability:** Prometheus metrics per pipeline stage, token usage, cache and retrieval
   hit-rates; structured logs with request ids; liveness vs readiness probes.
+- **Web app:** chat UI for users (streamed answers, clickable citations) and an admin console
+  for collections, drag-and-drop uploads and user accounts. A backend-for-frontend keeps
+  tokens out of the browser: HttpOnly session cookies, CSRF tokens, argon2id passwords, and
+  role-based, least-privilege API tokens.
 - **MCP server:** the same retrieval as Model Context Protocol tools, resources and a prompt,
   over **stdio** (for Claude Code / Claude Desktop) and **Streamable HTTP** (`/mcp`) with
   OAuth discovery metadata and audience-bound tokens (RFC 9728 / 8414 / 8707).
@@ -44,6 +50,16 @@ docker compose up --build -d     # first run pulls ~5 GB of models (qwen2.5:7b, 
 curl localhost:3000/ready        # {"status":"ready", ...} once every dependency is up
 scripts/demo.sh                  # client → token → upload samples → search → streamed answers
 ```
+
+**Web app:** open <http://localhost:8080> and sign in as the initial admin. On first start the
+password is generated and printed once:
+
+```bash
+docker compose logs web | grep -A1 'Initial admin'
+```
+
+Create a collection, upload documents (**Admin → Documents**), add chat users (**Admin → Users**),
+then chat. Details: [`docs/web.md`](docs/web.md).
 
 > **Performance note:** Docker on macOS can't use the GPU, so the 7B model runs on CPU
 > (~2–3 tokens/s, 30–100 s per answer; the first request also loads the model). Answers
@@ -138,6 +154,32 @@ Timings are in milliseconds: retrieval takes ~60 ms, generation on CPU takes the
 5. No chunks → refuse without calling the LLM. Otherwise build the prompt: numbered `<source>` blocks within a token budget, grounding and refusal rules, document text treated as untrusted.
 6. Stream tokens from the LLM (SSE: `sources` → `delta`… → `done`); parse `[n]` citations; flag invalid ones; cache the result; record metrics and one structured log line.
 
+## Web app
+
+| Chat user | Admin |
+|---|---|
+| Ask questions; answers stream in with numbered citations that expand to the source excerpt | Everything a chat user can do, plus create collections, upload documents, create and disable users |
+
+```
+browser (React SPA) ──HttpOnly session cookie──► web (Fastify BFF) :8080 ──JWT, scope by role──► api :3000
+```
+
+- **Sessions:** server-side in Redis (hashed ids, idle and absolute expiry), instantly revocable.
+  Session ids are rotated at login (fixation defense).
+- **CSRF:** SameSite=Lax cookies, an Origin check, and a per-session token in `X-CSRF-Token`.
+- **Roles in two layers:** BFF route checks, *and* chat users' requests carry a `query`-only API
+  token, so the API would refuse an upload even if a route check were missing.
+- **Streaming:** the BFF passes the API's SSE stream through. The SPA parses it from `fetch`
+  (EventSource can't POST), and Stop aborts all the way to the LLM.
+- **Rendering:** model output is rendered as React elements, never as HTML, under a strict CSP
+  (`script-src 'self'`).
+
+Full guide, including the design alternatives and the bugs found in browser testing: [`docs/web.md`](docs/web.md).
+
+| Admin: documents | Admin: users |
+|---|---|
+| ![Admin documents](docs/images/admin-documents.png) | ![Admin users](docs/images/admin-users.png) |
+
 ## MCP (Model Context Protocol)
 
 The service is also an MCP server, so AI apps like Claude Code can search your collections
@@ -182,6 +224,7 @@ Each has a short decision record in [`docs/adr/`](docs/adr/) with the alternativ
 | [Retrieval](docs/adr/0004-hybrid-retrieval.md) | Vector + full-text, Reciprocal Rank Fusion | Robust to paraphrase *and* identifiers without score tuning, vs. a cross-encoder's precision |
 | [Auth & tenancy](docs/adr/0005-auth-and-tenancy.md) | Client credentials, RS256 JWT, scopes, RLS | Stateless verification, vs. revocation only by expiry |
 | [Caching](docs/adr/0006-caching.md) | Versioned keys in Redis | Self-invalidating, tenant-safe, vs. no semantic (similar-question) hits |
+| [Web app auth](docs/adr/0008-web-bff.md) | Backend-for-frontend with server-side sessions | No tokens in the browser and instant revocation, vs. a stateful session store |
 | [MCP](docs/adr/0007-mcp-server.md) | One server definition, stdio + stateless Streamable HTTP, audience-bound tokens | Reuses auth/RLS in-process and scales without sessions, vs. no server-initiated messages |
 
 ## Evaluation
@@ -250,6 +293,9 @@ cd services/api && npm test && npm run test:integration
 # ml service (Python), in a container
 docker build --target test -t rag-ml-test services/ml && docker run --rm rag-ml-test
 
+# web app: BFF + client unit tests, then Postgres integration tests
+cd services/web && npm test && npm run test:integration
+
 # evaluation metric functions
 docker run --rm -v "$PWD/eval":/eval -w /eval python:3.12-slim python -m unittest
 ```
@@ -273,18 +319,21 @@ Every setting has a default; see [`.env.example`](.env.example).
 | `RETRIEVAL_MODE` / `RETRIEVAL_TOP_K` | `hybrid` / `5` | Retriever and chunks per prompt |
 | `RETRIEVAL_HIT_THRESHOLD` | `0.6` | Hit-rate metric threshold |
 | `METRICS_TOKEN` | unset | Protect `/metrics` with a bearer token |
+| `ADMIN_EMAIL` / `ADMIN_PASSWORD` | `admin@example.com` / generated | Initial web admin, created only when no users exist |
+| `WEB_PUBLIC_ORIGIN` / `COOKIE_SECURE` | `http://localhost:8080` / `false` | The web app's origin (CSRF Origin check); set Secure cookies behind HTTPS |
 | `PUBLIC_BASE_URL` | `http://localhost:3000` | Token issuer and OAuth/MCP discovery URLs; the MCP resource is `<base>/mcp` |
 
 ## Project layout
 
 ```
-db/migrations/        001 schema + HNSW · 002 weighted full-text · 003 row-level security
+db/migrations/        001 schema + HNSW · 002 weighted full-text · 003 row-level security · 004 web users
 services/api/src/     auth/ cache/ db/ generation/ mcp/ ml/ observability/ retrieval/ routes/ cli/
+services/web/         server/ (Fastify BFF: users, sessions, CSRF, roles, API client) · client/ (React SPA)
 services/ml/app/      parsers · chunker · embedder · pipeline · store · main (FastAPI)
 eval/                 dataset.jsonl · run_eval.py · metrics.py · reports/
 samples/              docs/ (fictional handbook, runbook, FAQ) · queries.md
 scripts/              demo.sh · eval.sh
-docs/                how-it-works.md · mcp.md · adr/ (architecture decision records)
+docs/                how-it-works.md · web.md · mcp.md · images/ · adr/ (architecture decision records)
 ```
 
 ## Production next steps

@@ -134,7 +134,57 @@ services:
       timeout: 3s
       retries: 20
 
+  # One-shot: register the web BFF as an API client on first run and store its credentials in a
+  # volume the web service reads. Re-runs are no-ops once the file exists.
+  web-bootstrap:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+    user: root # the named volume is root-owned
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-rag}:${POSTGRES_PASSWORD:-rag}@postgres:5432/${POSTGRES_DB:-rag}
+    entrypoint:
+      - sh
+      - -c
+      - test -s /bootstrap/web-client.json || { node dist/cli/create-client.js --name web-bff --json > /bootstrap/tmp.json && mv /bootstrap/tmp.json /bootstrap/web-client.json; }
+    volumes:
+      - web_bootstrap:/bootstrap
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: "no"
+
+  # Chat UI + admin console: React SPA served by a backend-for-frontend (sessions, roles, CSRF).
+  web:
+    build:
+      context: ./services/web
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-rag}:${POSTGRES_PASSWORD:-rag}@postgres:5432/${POSTGRES_DB:-rag}
+      REDIS_URL: redis://redis:6379
+      RAG_API_URL: http://api:3000
+      RAG_CREDENTIALS_FILE: /bootstrap/web-client.json
+      PUBLIC_ORIGIN: ${WEB_PUBLIC_ORIGIN:-http://localhost:8080}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false} # set true behind HTTPS
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@example.com}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-} # empty = generate one and print it once in the logs
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - web_bootstrap:/bootstrap:ro
+    ports:
+      - "8080:8080"
+    depends_on:
+      web-bootstrap:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
 volumes:
   pgdata:
   ollama_models:
   api_keys:
+  web_bootstrap:
