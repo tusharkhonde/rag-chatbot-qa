@@ -41,6 +41,19 @@ As the admin: **Admin → Documents** → create a collection → drop PDF, Mark
 Then **Admin → Users** → create a chat user. Sign in as that user and ask questions in **Chat**.
 
 A fixed admin password can be set with `ADMIN_PASSWORD` (≥ 12 characters) before the first start.
+
+**Lost the admin password?** The generated one is printed only on the first start, and container
+logs are discarded whenever the `web` container is recreated (e.g. `docker compose up --build`).
+Reset it with the break-glass CLI. It prints a new password and signs the user out of every session:
+
+```bash
+docker compose exec web node dist/server/cli/reset-password.js --email admin@example.com
+# options: --password <chosen password>   --enable (re-enable a disabled account)
+```
+
+It's a CLI rather than an HTTP endpoint on purpose: it requires shell access to the container,
+the same trust level as reading the logs the original password was printed to.
+
 More users can also be created from the command line:
 
 ```bash

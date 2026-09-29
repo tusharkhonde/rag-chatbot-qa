@@ -32,4 +32,13 @@ describe('user store (Postgres)', () => {
     await users.setDisabled(user!.id, true);
     expect(await users.authenticate(email, 'a long enough password')).toBeNull();
   });
+
+  it('setPassword replaces the hash under the same policy', async () => {
+    const user = (await users.findByEmail(email))!;
+    await users.setDisabled(user.id, false);
+    await users.setPassword(user.id, 'a brand new passphrase');
+    expect(await users.authenticate(email, 'a long enough password')).toBeNull();
+    expect(await users.authenticate(email, 'a brand new passphrase')).toMatchObject({ id: user.id });
+    await expect(users.setPassword(user.id, 'short')).rejects.toBeInstanceOf(WeakPasswordError);
+  });
 });

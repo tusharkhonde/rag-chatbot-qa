@@ -29,6 +29,14 @@ export function fakeUsers(): UserStore & { all: (User & { password: string })[] 
       return u ? strip(u) : null;
     },
     list: async () => all.map(strip),
+    findByEmail: async (email) => {
+      const u = all.find((x) => x.email === email.toLowerCase());
+      return u ? strip(u) : null;
+    },
+    setPassword: async (id, password) => {
+      const u = all.find((x) => x.id === id);
+      if (u) u.password = password;
+    },
     setDisabled: async (id, disabled) => {
       const u = all.find((x) => x.id === id);
       if (!u) return null;

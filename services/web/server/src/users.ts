@@ -40,6 +40,9 @@ export interface UserStore {
   get(id: string): Promise<User | null>;
   list(): Promise<User[]>;
   setDisabled(id: string, disabled: boolean): Promise<User | null>;
+  findByEmail(email: string): Promise<User | null>;
+  /** Replace a user's password (same policy and hashing as create). */
+  setPassword(id: string, password: string): Promise<void>;
 }
 
 const COLUMNS = `id, email, name, role, disabled, created_at AS "createdAt", last_login_at AS "lastLoginAt"`;
@@ -89,6 +92,16 @@ export function createUserStore(pool: pg.Pool): UserStore {
     async list() {
       const { rows } = await pool.query<User>(`SELECT ${COLUMNS} FROM web_users ORDER BY created_at`);
       return rows;
+    },
+
+    async findByEmail(email) {
+      const { rows } = await pool.query<User>(`SELECT ${COLUMNS} FROM web_users WHERE email = $1`, [normalizeEmail(email)]);
+      return rows[0] ?? null;
+    },
+
+    async setPassword(id, password) {
+      checkPassword(password);
+      await pool.query('UPDATE web_users SET password_hash = $2 WHERE id = $1', [id, await hash(password, ARGON2)]);
     },
 
     async setDisabled(id, disabled) {

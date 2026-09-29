@@ -18,7 +18,8 @@ if ((await users.count()) === 0) {
   await users.create({ email: config.ADMIN_EMAIL, name: 'Administrator', password, role: 'admin' });
   console.log(
     `\n  Initial admin created: ${config.ADMIN_EMAIL}` +
-      (config.ADMIN_PASSWORD ? ' (password from ADMIN_PASSWORD)' : `\n  Password: ${password}\n  (shown once, change it by creating a new admin)`) +
+      (config.ADMIN_PASSWORD ? ' (password from ADMIN_PASSWORD)' : `\n  Password: ${password}\n  (shown once; container logs are lost when the container is recreated)`) +
+      `\n  Lost it? docker compose exec web node dist/server/cli/reset-password.js --email ${config.ADMIN_EMAIL}` +
       '\n',
   );
 }

@@ -56,6 +56,8 @@ password is generated and printed once:
 
 ```bash
 docker compose logs web | grep -A1 'Initial admin'
+# lost it (logs are discarded when the container is recreated)? reset it:
+docker compose exec web node dist/server/cli/reset-password.js --email admin@example.com
 ```
 
 Create a collection, upload documents (**Admin → Documents**), add chat users (**Admin → Users**),
