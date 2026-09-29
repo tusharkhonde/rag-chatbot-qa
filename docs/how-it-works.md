@@ -27,6 +27,7 @@ headings as a reference.
   - [5.15 Evaluation](#515-evaluation)
   - [5.16 Containers and Compose](#516-containers-and-compose)
   - [5.17 Testing strategy](#517-testing-strategy)
+  - [5.18 MCP: exposing retrieval to AI applications](#518-mcp-exposing-retrieval-to-ai-applications)
 - [6. Bugs found while building it](#6-bugs-found-while-building-it)
 - [7. Tradeoffs and what changes at scale](#7-tradeoffs-and-what-changes-at-scale)
 - [8. Questions this design should be able to answer](#8-questions-this-design-should-be-able-to-answer)
@@ -630,6 +631,32 @@ plus user feedback.
 - **Security tests** are written as attacks: forged, expired, re-targeted, unsigned and
   algorithm-confused tokens; cross-tenant reads and writes; prompt-injection text.
 
+### 5.18 MCP: exposing retrieval to AI applications
+
+The Model Context Protocol lets any MCP-capable host (Claude Code, Claude Desktop, agents)
+discover and call this system without custom integration code. Full guide: [mcp.md](mcp.md).
+
+- **Three primitives, three controllers:** *tools* are chosen by the model (`search_documents`),
+  *resources* are loaded by the application by URI (`rag://chunks/{chunkId}`), *prompts* are
+  picked by the user (`answer_from_docs`).
+- **Protocol:** JSON-RPC 2.0 with an `initialize` handshake that negotiates version and capabilities.
+- **Ports and adapters:** one server definition depends on a `RagBackend` interface. The HTTP
+  endpoint binds it in-process to the token's tenant; the stdio server binds it to the REST API
+  using its own client credentials. Same tools, same results, verified by one smoke test for both.
+- **Transports:** stdio (the host spawns the process; stdout is reserved for protocol messages)
+  and Streamable HTTP (`POST /mcp`), here in **stateless** mode so any replica can serve any request.
+- **Authorization (MCP spec):**
+  - A 401 challenge carries `resource_metadata`, pointing to the protected-resource metadata (RFC 9728).
+  - That names the authorization server, whose metadata (RFC 8414) gives the token endpoint.
+  - Tokens are requested for a specific resource (RFC 8707) and carry it as their audience.
+  - Audience binding means a token for `/mcp` is useless against the REST API and vice versa.
+  - **No token passthrough:** a server never forwards the token it received (the confused-deputy problem).
+- **Designing tools for models:** accept names, not UUIDs; describe *when* to use each tool;
+  bound the output size; return recoverable failures as tool results with `isError`, so the model
+  can retry with a valid argument; validate input with schemas.
+- **Security:** tool results are an indirect prompt-injection channel. Excerpts are delimited and
+  labelled untrusted, and every tool is read-only.
+
 ## 6. Bugs found while building it
 
 These make good stories because each one was silent: nothing crashed.
@@ -717,6 +744,25 @@ on other services. Readiness asks "should this instance receive traffic?" and ch
 **Where does the latency go, and how would you reduce it?** Per-stage metrics show generation
 dominates (CPU inference). Options: GPU or hosted model, a smaller model, fewer prompt tokens,
 streaming for perceived latency (TTFT), and caching repeated questions.
+
+**What is MCP and why add it?** A standard protocol (JSON-RPC) for AI applications to discover and
+call tools, read resources and use prompts. Adding it lets any MCP host use this retrieval
+without a bespoke client: one integration instead of one per host.
+
+**Tools vs resources vs prompts?** Who decides: the model calls tools, the application loads
+resources, the user picks prompts.
+
+**stdio vs Streamable HTTP?** stdio is a local subprocess, single user, credentials on that machine.
+Streamable HTTP is a network service, multi-user, OAuth-protected. Stateless HTTP scales without
+sticky sessions but can't push messages between requests.
+
+**How does an MCP client know how to authenticate?** The 401's `WWW-Authenticate` header points to
+protected-resource metadata, which names the authorization server, whose metadata gives the
+token endpoint. The token is requested for the MCP resource and bound to it by audience.
+
+**What is token passthrough and why is it forbidden?** Forwarding the token you received to another
+service. The downstream service can't tell who it's really acting for, and audience checks stop
+meaning anything: a confused deputy. Each hop should authenticate as itself (or use token exchange).
 
 **What's the weakest part of this system?** Generation speed on CPU, and a small evaluation set
 written from the documents themselves (it favours keyword search). Next steps: a paraphrased

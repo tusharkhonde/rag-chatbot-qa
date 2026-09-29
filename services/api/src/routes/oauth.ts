@@ -5,6 +5,9 @@ import { SCOPES, type Scope, type TokenService } from '../auth/tokens.js';
 interface Deps {
   clients: ClientStore;
   tokens: TokenService;
+  issuer: string;
+  baseUrl: string;
+  mcpResource: string;
 }
 
 interface TokenRequest {
@@ -12,6 +15,7 @@ interface TokenRequest {
   client_id?: string;
   client_secret?: string;
   scope?: string;
+  resource?: string;
 }
 
 // RFC 6749 §5.2 error format.
@@ -32,7 +36,7 @@ function parseBasic(header: string | undefined): { id: string; secret: string } 
   }
 }
 
-export const oauthRoutes: FastifyPluginAsync<Deps> = async (app, { clients, tokens }) => {
+export const oauthRoutes: FastifyPluginAsync<Deps> = async (app, { clients, tokens, issuer, baseUrl, mcpResource }) => {
   /**
    * OAuth 2.0 client-credentials grant (RFC 6749 §4.4): machine-to-machine auth, no user involved.
    * The client proves possession of its secret once and gets a short-lived bearer token; the
@@ -69,11 +73,44 @@ export const oauthRoutes: FastifyPluginAsync<Deps> = async (app, { clients, toke
         scopes = requested as Scope[];
       }
 
-      const token = await tokens.issue({ ...principal, scopes });
+      // RFC 8707 resource indicators: the client names the resource it wants to call, and the token's
+      // audience is bound to it. A token for /mcp is rejected by the REST API and vice versa, so a
+      // token leaked from one can't be replayed against the other. No resource = the REST API.
+      if (body.resource !== undefined && body.resource !== mcpResource) {
+        return oauthError(reply, 400, 'invalid_target', `Unknown resource: ${body.resource}`);
+      }
+
+      const token = await tokens.issue({ ...principal, scopes }, { audience: body.resource });
       // Tokens are credentials: no caching by browsers or proxies (RFC 6749 §5.1).
       return reply.header('cache-control', 'no-store').header('pragma', 'no-cache').send(token);
     },
   );
+
+  // RFC 8414 authorization-server metadata: how clients discover the token endpoint and keys.
+  app.get('/.well-known/oauth-authorization-server', async (_req, reply) =>
+    reply.header('cache-control', 'public, max-age=300').send({
+      issuer,
+      token_endpoint: `${baseUrl}/oauth/token`,
+      jwks_uri: `${baseUrl}/.well-known/jwks.json`,
+      grant_types_supported: ['client_credentials'],
+      token_endpoint_auth_methods_supported: ['client_secret_basic', 'client_secret_post'],
+      scopes_supported: SCOPES,
+      response_types_supported: [], // no authorization endpoint: machine-to-machine only
+    }),
+  );
+
+  // RFC 9728 protected-resource metadata for the MCP endpoint. MCP clients fetch it (the URL comes
+  // from the 401's WWW-Authenticate header) to learn which authorization server issues tokens for it.
+  const protectedResource = {
+    resource: mcpResource,
+    authorization_servers: [issuer],
+    scopes_supported: ['query'],
+    bearer_methods_supported: ['header'],
+    resource_name: 'RAG document Q&A (MCP)',
+  };
+  for (const path of ['/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp']) {
+    app.get(path, async (_req, reply) => reply.header('cache-control', 'public, max-age=300').send(protectedResource));
+  }
 
   // Public keys for verifying our tokens. Other services can verify tokens with just this.
   app.get('/.well-known/jwks.json', async (_req, reply) =>

@@ -113,6 +113,8 @@ services:
       RETRIEVAL_TOP_K: ${RETRIEVAL_TOP_K:-5}
       RETRIEVAL_HIT_THRESHOLD: ${RETRIEVAL_HIT_THRESHOLD:-0.6}
       METRICS_TOKEN: ${METRICS_TOKEN:-}
+      # Public URL: token issuer and OAuth/MCP discovery metadata (MCP resource = <base>/mcp)
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:3000}
     volumes:
       - api_keys:/app/keys # JWT signing key persists across restarts (tokens stay valid)
     ports:

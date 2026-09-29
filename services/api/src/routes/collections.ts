@@ -76,4 +76,16 @@ export const collectionRoutes: FastifyPluginAsync<Deps> = async (app, { repo, ml
       }
     },
   );
+
+  app.get<{ Params: { chunkId: string } }>(
+    '/chunks/:chunkId',
+    {
+      config: { scope: 'query' },
+      schema: { params: { type: 'object', required: ['chunkId'], properties: { chunkId: { type: 'string', format: 'uuid' } } } },
+    },
+    async (req, reply) => {
+      const chunk = await repo.getChunk(req.clientId, req.params.chunkId);
+      return chunk ?? reply.code(404).send({ error: 'Chunk not found' });
+    },
+  );
 };

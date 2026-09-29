@@ -14,6 +14,7 @@ import type { Metrics } from './observability/metrics.js';
 import type { ReadinessCheck } from './observability/readiness.js';
 import type { Retriever } from './retrieval/retriever.js';
 import { collectionRoutes } from './routes/collections.js';
+import { mcpRoutes } from './routes/mcp.js';
 import { oauthRoutes } from './routes/oauth.js';
 import { opsRoutes } from './routes/ops.js';
 import { queryRoutes } from './routes/query.js';
@@ -67,16 +68,40 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   app.register(opsRoutes, { metrics, readinessChecks: deps.readinessChecks, metricsToken: config.METRICS_TOKEN });
 
   // Public: token issuance and the JWKS.
-  app.register(oauthRoutes, { clients, tokens });
+  app.register(oauthRoutes, {
+    clients,
+    tokens,
+    issuer: config.JWT_ISSUER,
+    baseUrl: config.PUBLIC_BASE_URL,
+    mcpResource: config.MCP_RESOURCE,
+  });
 
   // Everything else requires a valid access token and is scoped to its tenant.
   app.register(async (protectedApp) => {
-    protectedApp.addHook('onRequest', authenticate(tokens.verify));
+    protectedApp.addHook('onRequest', authenticate((token) => tokens.verify(token)));
     protectedApp.addHook('preHandler', requireScope);
     const defaults = { mode: config.RETRIEVAL_MODE, topK: config.RETRIEVAL_TOP_K };
     await protectedApp.register(collectionRoutes, { repo, ml });
     await protectedApp.register(searchRoutes, { repo, retriever, defaults, metrics });
     await protectedApp.register(queryRoutes, { repo, answerer, defaults, metrics });
+  });
+
+  // The MCP endpoint is its own OAuth resource: it only accepts tokens whose audience is the MCP
+  // resource URL, and its 401s advertise the protected-resource metadata (MCP authorization spec).
+  app.register(async (mcpApp) => {
+    mcpApp.addHook(
+      'onRequest',
+      authenticate((token) => tokens.verify(token, config.MCP_RESOURCE), {
+        resourceMetadataUrl: `${config.PUBLIC_BASE_URL}/.well-known/oauth-protected-resource/mcp`,
+      }),
+    );
+    mcpApp.addHook('preHandler', requireScope);
+    await mcpApp.register(mcpRoutes, {
+      repo,
+      retriever,
+      answerer,
+      defaults: { mode: config.RETRIEVAL_MODE, topK: config.RETRIEVAL_TOP_K },
+    });
   });
 
   return app;

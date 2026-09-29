@@ -15,8 +15,13 @@ export interface Principal {
 export class InvalidTokenError extends Error {}
 
 export interface TokenService {
-  issue(principal: Principal): Promise<{ access_token: string; token_type: 'Bearer'; expires_in: number; scope: string }>;
-  verify(token: string): Promise<Principal>;
+  /** audience defaults to the REST API; pass a resource (e.g. the MCP endpoint) to bind the token to it. */
+  issue(
+    principal: Principal,
+    opts?: { audience?: string },
+  ): Promise<{ access_token: string; token_type: 'Bearer'; expires_in: number; scope: string }>;
+  /** Verifies for one audience only: a token issued for another resource is rejected. */
+  verify(token: string, audience?: string): Promise<Principal>;
   jwks(): JSONWebKeySet;
 }
 
@@ -28,12 +33,12 @@ export function createTokenService(
   const keySet = createLocalJWKSet(jwks);
 
   return {
-    async issue(principal) {
+    async issue(principal, issueOpts = {}) {
       const scope = principal.scopes.join(' ');
       const token = await new SignJWT({ scope, client_id: principal.publicClientId })
         .setProtectedHeader({ alg: 'RS256', kid: key.kid, typ: 'at+jwt' }) // RFC 9068 access-token type
         .setIssuer(opts.issuer)
-        .setAudience(opts.audience)
+        .setAudience(issueOpts.audience ?? opts.audience)
         .setSubject(principal.clientId)
         .setIssuedAt()
         .setExpirationTime(`${opts.ttlSeconds}s`)
@@ -42,11 +47,11 @@ export function createTokenService(
       return { access_token: token, token_type: 'Bearer', expires_in: opts.ttlSeconds, scope };
     },
 
-    async verify(token) {
+    async verify(token, audience = opts.audience) {
       try {
         const { payload } = await jwtVerify(token, keySet, {
           issuer: opts.issuer,
-          audience: opts.audience,
+          audience,
           // Pin the algorithm. Never let the token's own header decide how it's verified:
           // that's the classic "alg: none" / RS256→HS256 key-confusion attack.
           algorithms: ['RS256'],

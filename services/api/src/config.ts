@@ -21,7 +21,9 @@ const Env = z.object({
   // the system prompt, question and answer (Ollama is configured for 8192 in docker-compose.yml).
   MAX_CONTEXT_TOKENS: z.coerce.number().int().min(256).default(3000),
   ANSWER_CACHE_TTL_SECONDS: z.coerce.number().int().min(0).default(3600),
-  JWT_ISSUER: z.string().default('rag-api'),
+  // Externally visible base URL: used as the token issuer and in OAuth / MCP discovery metadata.
+  PUBLIC_BASE_URL: z.string().default('http://localhost:3000'),
+  JWT_ISSUER: z.string().optional(), // defaults to PUBLIC_BASE_URL (RFC 8414: issuer is a URL)
   JWT_AUDIENCE: z.string().default('rag-api'),
   // Short-lived bearer tokens: a leaked token is useful for minutes, and "revocation" is mostly
   // just waiting for expiry (no per-request DB lookup needed to validate a JWT).
@@ -34,12 +36,19 @@ const Env = z.object({
   MIGRATIONS_DIR: z.string().default(new URL('../../../db/migrations', import.meta.url).pathname),
 });
 
-export type Config = z.infer<typeof Env>;
+export type Config = z.infer<typeof Env> & { JWT_ISSUER: string; MCP_RESOURCE: string };
 
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
+export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config & { JWT_ISSUER: string; MCP_RESOURCE: string } {
   const parsed = Env.safeParse(env);
   if (!parsed.success) {
     throw new Error(`Invalid environment:\n${z.prettifyError(parsed.error)}`);
   }
-  return parsed.data;
+  const base = parsed.data.PUBLIC_BASE_URL.replace(/\/$/, '');
+  return {
+    ...parsed.data,
+    PUBLIC_BASE_URL: base,
+    JWT_ISSUER: parsed.data.JWT_ISSUER ?? base,
+    // The MCP endpoint is a distinct OAuth "resource": tokens for it carry it as their audience.
+    MCP_RESOURCE: `${base}/mcp`,
+  };
 }

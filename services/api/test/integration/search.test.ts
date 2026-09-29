@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { migrate } from '../../src/db/migrate.js';
 import { createPool } from '../../src/db/pool.js';
+import { createRepo } from '../../src/db/repo.js';
 import { createSearchStore, toPgVector } from '../../src/retrieval/search.js';
 
 const pool = createPool(process.env.DATABASE_URL ?? 'postgresql://rag:rag@localhost:5432/rag');
@@ -90,5 +91,23 @@ describe('foreignEmbeddingModel', () => {
   it('detects chunks embedded with a different model', async () => {
     expect(await store.foreignEmbeddingModel(clientId, collectionA, 'ollama:test')).toBeNull();
     expect(await store.foreignEmbeddingModel(clientId, collectionA, 'openai:other')).toBe('ollama:test');
+  });
+});
+
+describe('repo.getChunk (MCP chunk resource)', () => {
+  it("returns a chunk to its owner and nothing to another tenant", async () => {
+    const repo = createRepo(pool);
+    const [hit] = await store.vectorSearch(clientId, collectionA, vec(0), 1);
+    const chunk = await repo.getChunk(clientId, hit!.chunkId);
+    expect(chunk).toMatchObject({ chunkId: hit!.chunkId, filename: 'a.md', content: hit!.content });
+
+    const { rows: [other] } = await pool.query(
+      `INSERT INTO clients (client_id, secret_hash, name) VALUES ('it-other-' || gen_random_uuid(), 'x', 'other') RETURNING id`,
+    );
+    try {
+      expect(await repo.getChunk(other.id, hit!.chunkId)).toBeNull();
+    } finally {
+      await pool.query('DELETE FROM clients WHERE id = $1', [other.id]);
+    }
   });
 });

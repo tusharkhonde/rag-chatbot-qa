@@ -29,6 +29,9 @@ Redis · Ollama (`qwen2.5:7b` for answers, `nomic-embed-text` for embeddings) ·
 - **Streaming:** answers stream over Server-Sent Events; client disconnects abort generation.
 - **Observability:** Prometheus metrics per pipeline stage, token usage, cache and retrieval
   hit-rates; structured logs with request ids; liveness vs readiness probes.
+- **MCP server:** the same retrieval as Model Context Protocol tools, resources and a prompt,
+  over **stdio** (for Claude Code / Claude Desktop) and **Streamable HTTP** (`/mcp`) with
+  OAuth discovery metadata and audience-bound tokens (RFC 9728 / 8414 / 8707).
 - **Evaluation harness:** precision@k, recall@k (hit@k), MRR per retrieval mode, answer quality
   (key-fact coverage, citation accuracy, LLM-as-judge), refusal accuracy and latency percentiles.
 
@@ -73,11 +76,14 @@ curl -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
 |---|---|---|
 | `POST /oauth/token` | – | Client-credentials grant → 15-min RS256 access token |
 | `GET /.well-known/jwks.json` | – | Public signing keys |
+| `GET /.well-known/oauth-authorization-server` · `/.well-known/oauth-protected-resource/mcp` | – | OAuth discovery metadata (RFC 8414 / RFC 9728) |
 | `POST /collections` · `GET /collections` | `documents:write` · `query` | Manage collections |
 | `POST /collections/:id/documents` | `documents:write` | Upload PDF / Markdown / text (idempotent by content hash) |
 | `GET /collections/:id/documents` | `query` | List documents and chunk counts |
 | `POST /collections/:id/search` | `query` | Retrieval only (`mode`: hybrid / vector / keyword) |
 | `POST /collections/:id/query` | `query` | Grounded answer with citations; `stream: true` for SSE |
+| `GET /chunks/:id` | `query` | One chunk's full text and source |
+| `POST /mcp` | `query` (token `aud` = `…/mcp`) | MCP over Streamable HTTP (stateless JSON-RPC) |
 | `GET /health` · `GET /ready` · `GET /metrics` | – | Liveness, readiness, Prometheus metrics |
 
 A real response (qwen2.5:7b on CPU; the question never says "Nimbus", semantic retrieval found it):
@@ -132,6 +138,38 @@ Timings are in milliseconds: retrieval takes ~60 ms, generation on CPU takes the
 5. No chunks → refuse without calling the LLM. Otherwise build the prompt: numbered `<source>` blocks within a token budget, grounding and refusal rules, document text treated as untrusted.
 6. Stream tokens from the LLM (SSE: `sources` → `delta`… → `done`); parse `[n]` citations; flag invalid ones; cache the result; record metrics and one structured log line.
 
+## MCP (Model Context Protocol)
+
+The service is also an MCP server, so AI apps like Claude Code can search your collections
+directly. Full guide: [`docs/mcp.md`](docs/mcp.md).
+
+| Primitive | Name | Purpose |
+|---|---|---|
+| Tool | `list_collections` · `list_documents` | Discover what can be searched |
+| Tool | `search_documents` | Hybrid search; excerpts with sources, resource links to each chunk |
+| Tool | `ask_question` | Full RAG answer with citations (local LLM, slow on CPU) |
+| Resource | `rag://collections` · `rag://chunks/{chunkId}` | Collection list; full chunk text |
+| Prompt | `answer_from_docs` | "Answer only from this collection, with citations" |
+
+```bash
+# A query-only client for MCP (least privilege)
+docker compose exec api node dist/cli/create-client.js --name mcp --scopes query
+
+# Claude Code, stdio transport (runs inside the api container; nothing installed on the host)
+claude mcp add rag-docs -e RAG_CLIENT_ID=<id> -e RAG_CLIENT_SECRET=<secret> \
+  -- docker compose -f "$PWD/docker-compose.yml" exec -T -e RAG_CLIENT_ID -e RAG_CLIENT_SECRET \
+     api node dist/mcp/stdio.js
+
+# Both transports end to end, including the OAuth discovery chain for /mcp
+docker compose exec -T -e RAG_CLIENT_ID=<id> -e RAG_CLIENT_SECRET=<secret> api \
+  node dist/cli/mcp-smoke.js --collection <name> --query "rollback"
+```
+
+The HTTP endpoint only accepts tokens issued for it (`resource=http://localhost:3000/mcp` at
+the token endpoint → `aud` = the MCP URL). REST tokens are rejected there and MCP tokens are
+rejected by the REST API. An unauthenticated request gets a 401 whose `WWW-Authenticate` header
+points at the protected-resource metadata, which is how MCP clients discover where to get a token.
+
 ## Design decisions
 
 Each has a short decision record in [`docs/adr/`](docs/adr/) with the alternatives considered.
@@ -144,6 +182,7 @@ Each has a short decision record in [`docs/adr/`](docs/adr/) with the alternativ
 | [Retrieval](docs/adr/0004-hybrid-retrieval.md) | Vector + full-text, Reciprocal Rank Fusion | Robust to paraphrase *and* identifiers without score tuning, vs. a cross-encoder's precision |
 | [Auth & tenancy](docs/adr/0005-auth-and-tenancy.md) | Client credentials, RS256 JWT, scopes, RLS | Stateless verification, vs. revocation only by expiry |
 | [Caching](docs/adr/0006-caching.md) | Versioned keys in Redis | Self-invalidating, tenant-safe, vs. no semantic (similar-question) hits |
+| [MCP](docs/adr/0007-mcp-server.md) | One server definition, stdio + stateless Streamable HTTP, audience-bound tokens | Reuses auth/RLS in-process and scales without sessions, vs. no server-initiated messages |
 
 ## Evaluation
 
@@ -219,7 +258,9 @@ Coverage highlights: chunk boundaries/overlap/limits, parsers (heading paths, PD
 RRF, SQL retrieval on seeded vectors (including cross-collection isolation and the
 double-stemming regression), prompt construction and injection escaping, citation parsing,
 cache keys (tenant, version), SSE, token forgery (expired, wrong audience/issuer/key,
-`alg: none`, HS256 key confusion, tampering), OAuth errors and rate limiting, and RLS.
+`alg: none`, HS256 key confusion, tampering), OAuth errors and rate limiting, RLS, and MCP
+(a real MCP client over the SDK's in-memory transport, `/mcp` JSON-RPC, audience binding,
+discovery metadata, the stdio backend's token refresh).
 
 ## Configuration
 
@@ -232,17 +273,18 @@ Every setting has a default; see [`.env.example`](.env.example).
 | `RETRIEVAL_MODE` / `RETRIEVAL_TOP_K` | `hybrid` / `5` | Retriever and chunks per prompt |
 | `RETRIEVAL_HIT_THRESHOLD` | `0.6` | Hit-rate metric threshold |
 | `METRICS_TOKEN` | unset | Protect `/metrics` with a bearer token |
+| `PUBLIC_BASE_URL` | `http://localhost:3000` | Token issuer and OAuth/MCP discovery URLs; the MCP resource is `<base>/mcp` |
 
 ## Project layout
 
 ```
 db/migrations/        001 schema + HNSW · 002 weighted full-text · 003 row-level security
-services/api/src/     auth/ cache/ db/ generation/ ml/ observability/ retrieval/ routes/ cli/
+services/api/src/     auth/ cache/ db/ generation/ mcp/ ml/ observability/ retrieval/ routes/ cli/
 services/ml/app/      parsers · chunker · embedder · pipeline · store · main (FastAPI)
 eval/                 dataset.jsonl · run_eval.py · metrics.py · reports/
 samples/              docs/ (fictional handbook, runbook, FAQ) · queries.md
 scripts/              demo.sh · eval.sh
-docs/adr/             architecture decision records
+docs/                how-it-works.md · mcp.md · adr/ (architecture decision records)
 ```
 
 ## Production next steps

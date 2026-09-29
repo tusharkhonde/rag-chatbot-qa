@@ -17,6 +17,16 @@ export interface DocumentSummary {
   createdAt: string;
 }
 
+export interface ChunkDetail {
+  chunkId: string;
+  documentId: string;
+  collectionId: string;
+  filename: string;
+  ordinal: number;
+  content: string;
+  metadata: import('../retrieval/types.js').ChunkMetadata;
+}
+
 // Every method takes the tenant (clientId), filters by it in SQL, AND runs under Row-Level
 // Security for that tenant (withTenant). A collection owned by another client is
 // indistinguishable from one that doesn't exist: callers get null → 404.
@@ -25,6 +35,7 @@ export interface Repo {
   listCollections(clientId: string): Promise<Collection[]>;
   getCollection(clientId: string, collectionId: string): Promise<Collection | null>;
   listDocuments(clientId: string, collectionId: string): Promise<DocumentSummary[]>;
+  getChunk(clientId: string, chunkId: string): Promise<ChunkDetail | null>;
 }
 
 const COLLECTION_COLUMNS = `id, name, version, created_at AS "createdAt"`;
@@ -68,6 +79,19 @@ export function createRepo(pool: pg.Pool): Repo {
         [collectionId, clientId],
       ));
       return rows;
+    },
+
+    async getChunk(clientId, chunkId) {
+      const { rows } = await withTenant(pool, clientId, (db) => db.query<ChunkDetail>(
+        `SELECT c.id AS "chunkId", c.document_id AS "documentId", c.collection_id AS "collectionId",
+                d.filename, c.ordinal, c.content, c.metadata
+           FROM chunks c
+           JOIN documents d ON d.id = c.document_id
+           JOIN collections co ON co.id = c.collection_id
+          WHERE c.id = $1 AND co.client_id = $2`,
+        [chunkId, clientId],
+      ));
+      return rows[0] ?? null;
     },
   };
 }
