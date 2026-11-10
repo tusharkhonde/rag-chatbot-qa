@@ -2,7 +2,7 @@
 
 A browser front end for the RAG service with two kinds of users:
 
-- **Admins** create collections, upload documents and manage user accounts.
+- **Admins** create collections, upload and delete documents, and manage user accounts.
 - **Chat users** ask questions and get streamed, cited answers.
 
 ![Chat](images/chat.png)
@@ -153,7 +153,7 @@ into it.
 | | Chat user (`user`) | Admin (`admin`) |
 |---|---|---|
 | List collections, chat | ✓ | ✓ |
-| Create collections, upload documents | ✗ 403 | ✓ |
+| Create collections, upload and delete documents | ✗ 403 | ✓ |
 | Manage users | ✗ 403 | ✓ (can't disable themselves) |
 | RAG API token scope used | `query` | `documents:write query` |
 
@@ -248,6 +248,7 @@ services/web/
   - writes without or with a wrong CSRF token, and from a foreign origin
   - chat user blocked from admin routes, and every API call they trigger uses the user role
   - admin upload routed through the admin client
+  - document deletion: admin only, CSRF required, sent with the admin client
   - disabling a user kills their sessions
   - admins can't disable themselves
   - SSE passthrough
@@ -281,4 +282,3 @@ services/web/
 - **Uploads are synchronous and sequential** (the browser waits while each file is embedded);
   async ingestion with progress events would suit large PDFs.
 - **One organization per deployment** (see Tenancy).
-- **No document deletion** yet (the API doesn't expose it).

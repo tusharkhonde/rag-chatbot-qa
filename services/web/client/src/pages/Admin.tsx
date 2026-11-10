@@ -83,6 +83,18 @@ function Documents() {
     await loadDocuments(selected);
   }
 
+  async function remove(d: DocumentSummary) {
+    // Deleting removes the document's chunks from search immediately and invalidates cached answers.
+    if (!window.confirm(`Delete "${d.filename}"? It will no longer be searchable or cited.`)) return;
+    setError('');
+    try {
+      await api.deleteDocument(selected, d.id);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+    await loadDocuments(selected).catch((e) => setError(e.message));
+  }
+
   const onDrop = (e: DragEvent) => {
     e.preventDefault();
     setDragging(false);
@@ -149,6 +161,7 @@ function Documents() {
               <th>File</th>
               <th>Chunks</th>
               <th>Added</th>
+              <th />
             </tr>
           </thead>
           <tbody>
@@ -157,11 +170,16 @@ function Documents() {
                 <td>{d.filename}</td>
                 <td>{d.chunkCount}</td>
                 <td>{new Date(d.createdAt).toLocaleString()}</td>
+                <td>
+                  <button className="link danger" onClick={() => void remove(d)} aria-label={`Delete ${d.filename}`}>
+                    Delete
+                  </button>
+                </td>
               </tr>
             ))}
             {documents.length === 0 && (
               <tr>
-                <td colSpan={3} className="muted">
+                <td colSpan={4} className="muted">
                   No documents yet.
                 </td>
               </tr>

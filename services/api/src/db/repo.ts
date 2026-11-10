@@ -36,6 +36,8 @@ export interface Repo {
   getCollection(clientId: string, collectionId: string): Promise<Collection | null>;
   listDocuments(clientId: string, collectionId: string): Promise<DocumentSummary[]>;
   getChunk(clientId: string, chunkId: string): Promise<ChunkDetail | null>;
+  /** Deletes a document (its chunks cascade) and bumps the collection version. false = not found. */
+  deleteDocument(clientId: string, collectionId: string, documentId: string): Promise<boolean>;
 }
 
 const COLLECTION_COLUMNS = `id, name, version, created_at AS "createdAt"`;
@@ -92,6 +94,24 @@ export function createRepo(pool: pg.Pool): Repo {
         [chunkId, clientId],
       ));
       return rows[0] ?? null;
+    },
+
+    async deleteDocument(clientId, collectionId, documentId) {
+      return withTenant(pool, clientId, async (db) => {
+        // Chunks go with the document (ON DELETE CASCADE). RLS restricts the DELETE to this
+        // tenant's rows, and the explicit client_id join keeps the application layer honest too.
+        const { rowCount } = await db.query(
+          `DELETE FROM documents d
+            USING collections c
+            WHERE d.id = $1 AND d.collection_id = $2
+              AND c.id = d.collection_id AND c.client_id = $3`,
+          [documentId, collectionId, clientId],
+        );
+        if (!rowCount) return false;
+        // Same transaction: the version bump that invalidates cached answers commits with the delete.
+        await db.query('UPDATE collections SET version = version + 1 WHERE id = $1', [collectionId]);
+        return true;
+      });
     },
   };
 }

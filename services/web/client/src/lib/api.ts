@@ -43,6 +43,8 @@ export const api = {
     form.append('file', file);
     return request<{ documentId: string; created: boolean; chunkCount: number }>('POST', `/api/collections/${collectionId}/documents`, form);
   },
+  deleteDocument: (collectionId: string, documentId: string) =>
+    request<unknown>('DELETE', `/api/collections/${collectionId}/documents/${documentId}`),
 
   users: () => request<{ users: AdminUser[] }>('GET', '/api/admin/users').then((r) => r.users),
   createUser: (input: { email: string; name: string; password: string; role: Role }) =>

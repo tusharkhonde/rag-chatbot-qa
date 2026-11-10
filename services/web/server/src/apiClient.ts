@@ -21,6 +21,7 @@ export interface RagApi {
   createCollection(name: string): Promise<unknown>;
   listDocuments(collectionId: string): Promise<unknown>;
   upload(collectionId: string, file: { filename: string; mimeType: string; data: Buffer }): Promise<{ status: number; body: unknown }>;
+  deleteDocument(collectionId: string, documentId: string): Promise<void>;
   /** Starts a streamed answer; the caller pipes the SSE body through. */
   queryStream(collectionId: string, question: string, signal: AbortSignal): Promise<Response>;
 }
@@ -85,6 +86,10 @@ export function createApiClient(opts: {
         form.append('file', new Blob([new Uint8Array(file.data)], { type: file.mimeType }), file.filename);
         const res = await send(`/collections/${encodeURIComponent(id)}/documents`, { method: 'POST', body: form });
         return { status: res.status, body: await res.json().catch(() => null) };
+      },
+      async deleteDocument(id, documentId) {
+        const res = await send(`/collections/${encodeURIComponent(id)}/documents/${encodeURIComponent(documentId)}`, { method: 'DELETE' });
+        if (!res.ok) throw new ApiError(res.status, await res.json().catch(() => null));
       },
       queryStream: (id, question, signal) =>
         send(`/collections/${encodeURIComponent(id)}/query`, { ...post({ question, stream: true }), signal }),

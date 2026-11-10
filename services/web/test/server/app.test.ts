@@ -101,6 +101,22 @@ describe('roles', () => {
     expect(calls.at(-1)).toMatchObject({ role: 'admin', method: 'upload', args: ['11111111-1111-4111-8111-111111111111', 'a.md'] });
   });
 
+  it('only an admin can delete a document, and only with a CSRF token', async () => {
+    const { app, calls } = setup();
+    const url = '/api/collections/11111111-1111-4111-8111-111111111111/documents/22222222-2222-4222-8222-222222222222';
+    const user = await login(app, 'user@example.com', 'another long password');
+    expect((await app.inject({ method: 'DELETE', url, headers: as(user) })).statusCode).toBe(403);
+    const admin = await login(app, 'admin@example.com', 'correct horse battery');
+    expect((await app.inject({ method: 'DELETE', url, headers: { cookie: `sid=${admin.sid}`, origin: ORIGIN } })).statusCode).toBe(403);
+    expect(calls.some((c) => c.method === 'deleteDocument')).toBe(false);
+    const res = await app.inject({ method: 'DELETE', url, headers: as(admin) });
+    expect(res.statusCode).toBe(204);
+    expect(calls.at(-1)).toMatchObject({
+      role: 'admin', method: 'deleteDocument',
+      args: ['11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222'],
+    });
+  });
+
   it('disabling a user revokes all of their sessions immediately', async () => {
     const { app } = setup();
     const admin = await login(app, 'admin@example.com', 'correct horse battery');

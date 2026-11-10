@@ -80,3 +80,48 @@ describe('row-level security', () => {
     }
   });
 });
+
+describe('document deletion', () => {
+  async function seedDocument(tenant: string, collectionName: string) {
+    const [col] = (await repo.listCollections(tenant)).filter((c) => c.name === collectionName);
+    const { rows: [doc] } = await pool.query(
+      `INSERT INTO documents (collection_id, filename, mime_type, sha256, status, chunk_count)
+       VALUES ($1, 'del.md', 'text/markdown', md5(random()::text), 'ready', 2) RETURNING id`,
+      [col!.id],
+    );
+    for (const ordinal of [0, 1]) {
+      await pool.query(
+        `INSERT INTO chunks (document_id, collection_id, ordinal, content, token_count, metadata, embedding, embedding_model)
+         VALUES ($1, $2, $3, 'text', 1, '{}', array_fill(0.01, ARRAY[768])::vector, 'ollama:test')`,
+        [doc.id, col!.id, ordinal],
+      );
+    }
+    return { collection: col!, documentId: doc.id as string };
+  }
+
+  it('deletes the document and its chunks, and bumps the collection version', async () => {
+    const { collection, documentId } = await seedDocument(tenantA, 'a-docs');
+    const before = (await repo.getCollection(tenantA, collection.id))!.version;
+    expect(await repo.deleteDocument(tenantA, collection.id, documentId)).toBe(true);
+    const { rows } = await pool.query('SELECT count(*)::int AS n FROM chunks WHERE document_id = $1', [documentId]);
+    expect(rows[0].n).toBe(0);
+    expect((await repo.getCollection(tenantA, collection.id))!.version).toBe(before + 1);
+    expect(await repo.deleteDocument(tenantA, collection.id, documentId)).toBe(false); // already gone
+  });
+
+  it("can't delete another tenant's document, even with the right ids", async () => {
+    const { collection, documentId } = await seedDocument(tenantB, 'b-docs');
+    const before = (await repo.getCollection(tenantB, collection.id))!.version;
+    expect(await repo.deleteDocument(tenantA, collection.id, documentId)).toBe(false);
+    const { rows } = await pool.query('SELECT count(*)::int AS n FROM documents WHERE id = $1', [documentId]);
+    expect(rows[0].n).toBe(1);
+    expect((await repo.getCollection(tenantB, collection.id))!.version).toBe(before);
+  });
+
+  it('RLS alone stops a cross-tenant DELETE that has no tenant filter', async () => {
+    const { documentId } = await seedDocument(tenantB, 'b-docs');
+    const deleted = await withTenant(pool, tenantA, async (db) =>
+      (await db.query('DELETE FROM documents WHERE id = $1', [documentId])).rowCount);
+    expect(deleted).toBe(0);
+  });
+});

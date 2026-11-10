@@ -9,6 +9,7 @@ import { auth, fakeAuth } from './helpers.js';
 const CLIENT_A = 'client-a';
 const OWNED = '11111111-1111-4111-8111-111111111111';
 const FOREIGN = '22222222-2222-4222-8222-222222222222'; // exists, but belongs to another client
+const DOC = '33333333-3333-4333-8333-333333333333';
 
 function fakeRepo(): Repo {
   const collection: Collection = { id: OWNED, name: 'docs', version: 0, createdAt: 'now' };
@@ -18,6 +19,9 @@ function fakeRepo(): Repo {
     // Tenant-scoped lookup: only returns the collection when the owner matches.
     getCollection: vi.fn(async (clientId, id) => (clientId === CLIENT_A && id === OWNED ? collection : null)),
     listDocuments: vi.fn(async () => []),
+    getChunk: vi.fn(async () => null),
+    deleteDocument: vi.fn(async (clientId, collectionId, documentId) =>
+      clientId === CLIENT_A && collectionId === OWNED && documentId === DOC),
   };
 }
 
@@ -128,5 +132,30 @@ describe('collections routes', () => {
     expect(res.headers['www-authenticate']).toContain('scope="documents:write"');
     expect(ml.ingest).not.toHaveBeenCalled();
     expect((await app.inject({ method: 'GET', url: '/collections', headers: auth })).statusCode).toBe(200);
+  });
+
+  describe('DELETE /collections/:id/documents/:documentId', () => {
+    it('deletes an owned document with 204', async () => {
+      const { app, repo } = setup();
+      const res = await app.inject({ method: 'DELETE', url: `/collections/${OWNED}/documents/${DOC}`, headers: auth });
+      expect(res.statusCode).toBe(204);
+      expect(repo.deleteDocument).toHaveBeenCalledWith(CLIENT_A, OWNED, DOC);
+    });
+
+    it("404s for a missing document or another client's collection", async () => {
+      const { app } = setup();
+      const missing = '44444444-4444-4444-8444-444444444444';
+      expect((await app.inject({ method: 'DELETE', url: `/collections/${OWNED}/documents/${missing}`, headers: auth })).statusCode).toBe(404);
+      expect((await app.inject({ method: 'DELETE', url: `/collections/${FOREIGN}/documents/${DOC}`, headers: auth })).statusCode).toBe(404);
+    });
+
+    it('403s for a query-only token and 400s for a non-uuid id', async () => {
+      const { app, repo } = setup({}, ['query']);
+      expect((await app.inject({ method: 'DELETE', url: `/collections/${OWNED}/documents/${DOC}`, headers: auth })).statusCode).toBe(403);
+      const full = setup();
+      expect((await full.app.inject({ method: 'DELETE', url: `/collections/${OWNED}/documents/nope`, headers: auth })).statusCode).toBe(400);
+      expect(repo.deleteDocument).not.toHaveBeenCalled();
+      expect(full.repo.deleteDocument).not.toHaveBeenCalled();
+    });
   });
 });

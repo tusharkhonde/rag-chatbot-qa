@@ -45,6 +45,25 @@ export const appRoutes: FastifyPluginAsync<Deps> = async (app, { api, users, ses
     return reply.code(status >= 500 ? 502 : status).send(body);
   });
 
+  app.delete<{ Params: { id: string; documentId: string } }>(
+    '/collections/:id/documents/:documentId',
+    {
+      preHandler: admin,
+      schema: {
+        params: {
+          type: 'object',
+          required: ['id', 'documentId'],
+          properties: { id: { type: 'string', format: 'uuid' }, documentId: { type: 'string', format: 'uuid' } },
+        },
+      },
+    },
+    async (req, reply) => {
+      await rag(req.session!.role).deleteDocument(req.params.id, req.params.documentId);
+      req.log.info({ event: 'document_deleted', userId: req.session!.userId, documentId: req.params.documentId }, 'document deleted');
+      return reply.code(204).send();
+    },
+  );
+
   // ---------------------------------------------------------------- chat (streamed)
 
   app.post<{ Body: { collectionId: string; question: string } }>(

@@ -13,6 +13,15 @@ const collectionParams = {
   properties: { collectionId: { type: 'string', format: 'uuid' } },
 } as const;
 
+const documentParams = {
+  type: 'object',
+  required: ['collectionId', 'documentId'],
+  properties: {
+    collectionId: { type: 'string', format: 'uuid' },
+    documentId: { type: 'string', format: 'uuid' },
+  },
+} as const;
+
 export const collectionRoutes: FastifyPluginAsync<Deps> = async (app, { repo, ml }) => {
   app.post<{ Body: { name: string } }>(
     '/collections',
@@ -74,6 +83,18 @@ export const collectionRoutes: FastifyPluginAsync<Deps> = async (app, { repo, ml
         if (err instanceof MlClientError) return reply.code(err.statusCode).send({ error: err.message });
         throw err;
       }
+    },
+  );
+
+  app.delete<{ Params: { collectionId: string; documentId: string } }>(
+    '/collections/:collectionId/documents/:documentId',
+    { config: { scope: 'documents:write' }, schema: { params: documentParams } },
+    async (req, reply) => {
+      const { collectionId, documentId } = req.params;
+      const deleted = await repo.deleteDocument(req.clientId, collectionId, documentId);
+      // Another tenant's document is indistinguishable from a missing one: 404 either way.
+      if (!deleted) return reply.code(404).send({ error: 'Document not found' });
+      return reply.code(204).send();
     },
   );
 

@@ -400,7 +400,7 @@ LLM model, embedding model, mode, top-k, prompt version), 1-hour TTL. Measured: 
 
 **Invalidation by key design.** "There are only two hard things in computer science: cache
 invalidation and naming things." Instead of finding and deleting affected keys when a document
-is added, every ingest bumps `collections.version`, which is part of the key. Old entries
+is added or deleted, the same transaction bumps `collections.version`, which is part of the key. Old entries
 simply stop matching and age out through TTL and LRU eviction. The same trick covers config
 changes: a new model or prompt version changes the key.
 
@@ -425,6 +425,10 @@ windows on Monday" vs "on Friday").
   unique constraint pick exactly one winner; the loser reads the existing id.
 - **Atomic:** document, chunks and version bump commit together or not at all. There's never
   a document with half its chunks.
+- **Deletion is atomic too** (`DELETE /collections/:id/documents/:documentId`): the chunks go
+  with the document through `ON DELETE CASCADE`, and the version bump commits in the same
+  transaction, so no cached answer can cite a deleted document. Row-level security covers
+  `DELETE` as well: another tenant's document id simply matches no row (404).
 - **Slow work outside transactions:** embedding happens before the transaction opens.
 
 ### 5.12 Authentication: OAuth2 client credentials and JWTs
@@ -762,7 +766,7 @@ tenant settings; 404 for other tenants' resources; tenant id in every cache key.
 exists, which leaks information (an IDOR/BOLA enumeration aid).
 
 **How is the cache invalidated when documents change?** It isn't explicitly: the collection
-version is part of the key and every ingest bumps it, so stale entries stop matching and expire.
+version is part of the key and every ingest or deletion bumps it, so stale entries stop matching and expire.
 
 **What if Redis goes down?** Requests continue with cache misses. The client fails fast instead
 of queueing, and a wrapper turns cache errors into misses.

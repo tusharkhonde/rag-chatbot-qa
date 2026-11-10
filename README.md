@@ -98,6 +98,7 @@ curl -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
 | `POST /collections` · `GET /collections` | `documents:write` · `query` | Manage collections |
 | `POST /collections/:id/documents` | `documents:write` | Upload PDF / Markdown / text (idempotent by content hash) |
 | `GET /collections/:id/documents` | `query` | List documents and chunk counts |
+| `DELETE /collections/:id/documents/:documentId` | `documents:write` | Delete a document and its chunks (invalidates cached answers) |
 | `POST /collections/:id/search` | `query` | Retrieval only (`mode`: hybrid / vector / keyword) |
 | `POST /collections/:id/query` | `query` | Grounded answer with citations; `stream: true` for SSE |
 | `GET /chunks/:id` | `query` | One chunk's full text and source |
@@ -160,7 +161,7 @@ Timings are in milliseconds: retrieval takes ~60 ms, generation on CPU takes the
 
 | Chat user | Admin |
 |---|---|
-| Ask questions; answers stream in with numbered citations that expand to the source excerpt | Everything a chat user can do, plus create collections, upload documents, create and disable users |
+| Ask questions; answers stream in with numbered citations that expand to the source excerpt | Everything a chat user can do, plus create collections, upload and delete documents, create and disable users |
 
 ```
 browser (React SPA) ──HttpOnly session cookie──► web (Fastify BFF) :8080 ──JWT, scope by role──► api :3000
