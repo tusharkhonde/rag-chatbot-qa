@@ -29,6 +29,8 @@ Redis · Ollama (`qwen2.5:7b` for answers, `nomic-embed-text` for embeddings) ·
 - **Caching that invalidates itself:** query embeddings and answers in Redis, keyed on tenant,
   collection version, models and prompt version.
 - **Streaming:** answers stream over Server-Sent Events; client disconnects abort generation.
+- **Background ingestion:** uploads return 202 at once; worker threads claim jobs from a
+  Postgres queue (`FOR UPDATE SKIP LOCKED`, leases, retries with backoff, cancellation by delete).
 - **Observability:** Prometheus metrics per pipeline stage, token usage, cache and retrieval
   hit-rates; structured logs with request ids; liveness vs readiness probes.
 - **Web app:** chat UI for users (streamed answers, clickable citations) and an admin console
@@ -81,8 +83,11 @@ TOKEN=$(curl -s -u "$CLIENT_ID:$CLIENT_SECRET" -d grant_type=client_credentials 
 # 3. Create a collection and upload documents
 COLLECTION=$(curl -s -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
   -d '{"name":"handbook"}' localhost:3000/collections | jq -r .id)
-curl -H "authorization: Bearer $TOKEN" -F file=@samples/docs/nimbus-queue-runbook.md \
-  localhost:3000/collections/$COLLECTION/documents
+DOC=$(curl -s -H "authorization: Bearer $TOKEN" -F file=@samples/docs/nimbus-queue-runbook.md \
+  localhost:3000/collections/$COLLECTION/documents | jq -r .documentId)   # 202 Accepted
+
+# 3b. Indexing runs in the background: poll until "status" is "ready" (or "failed", with "error")
+curl -s -H "authorization: Bearer $TOKEN" localhost:3000/collections/$COLLECTION/documents/$DOC | jq .status
 
 # 4. Ask (add "stream": true for Server-Sent Events)
 curl -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
@@ -96,8 +101,9 @@ curl -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
 | `GET /.well-known/jwks.json` | – | Public signing keys |
 | `GET /.well-known/oauth-authorization-server` · `/.well-known/oauth-protected-resource/mcp` | – | OAuth discovery metadata (RFC 8414 / RFC 9728) |
 | `POST /collections` · `GET /collections` | `documents:write` · `query` | Manage collections |
-| `POST /collections/:id/documents` | `documents:write` | Upload PDF / Markdown / text (idempotent by content hash) |
-| `GET /collections/:id/documents` | `query` | List documents and chunk counts |
+| `POST /collections/:id/documents` | `documents:write` | Upload PDF / Markdown / text: **202**, indexed in the background (idempotent by content hash) |
+| `GET /collections/:id/documents` | `query` | List documents with status and chunk counts |
+| `GET /collections/:id/documents/:documentId` | `query` | One document's `status` (`processing` / `ready` / `failed`) and `error` |
 | `DELETE /collections/:id/documents/:documentId` | `documents:write` | Delete a document and its chunks (invalidates cached answers) |
 | `POST /collections/:id/search` | `query` | Retrieval only (`mode`: hybrid / vector / keyword) |
 | `POST /collections/:id/query` | `query` | Grounded answer with citations; `stream: true` for SSE |
@@ -141,7 +147,8 @@ Timings are in milliseconds: retrieval takes ~60 ms, generation on CPU takes the
 - **api** owns the HTTP edge: OAuth2 token issuance, JWT verification, per-route scopes,
   tenant-scoped data access, hybrid retrieval, prompt construction, streaming, caching, metrics.
 - **ml** owns document processing: parsing (pypdf, heading-aware Markdown), chunking, and
-  embedding (via Ollama), plus query embedding for the API so both sides use the same model.
+  embedding (via Ollama), run by background workers that drain a Postgres job queue, plus
+  query embedding for the API so both sides use the same model.
   It isn't reachable from outside the compose network, and its writes also run under RLS.
 - **postgres** holds tenants, collections, documents and chunks (`vector(768)` + HNSW index,
   generated weighted `tsvector` + GIN index), with row-level security policies.
@@ -229,6 +236,7 @@ Each has a short decision record in [`docs/adr/`](docs/adr/) with the alternativ
 | [Caching](docs/adr/0006-caching.md) | Versioned keys in Redis | Self-invalidating, tenant-safe, vs. no semantic (similar-question) hits |
 | [Web app auth](docs/adr/0008-web-bff.md) | Backend-for-frontend with server-side sessions | No tokens in the browser and instant revocation, vs. a stateful session store |
 | [MCP](docs/adr/0007-mcp-server.md) | One server definition, stdio + stateless Streamable HTTP, audience-bound tokens | Reuses auth/RLS in-process and scales without sessions, vs. no server-initiated messages |
+| [Ingestion](docs/adr/0009-async-ingestion.md) | 202 + background workers on a Postgres job queue | Atomic enqueue, no new infrastructure, vs. a broker's throughput and push delivery |
 
 ## Evaluation
 
@@ -295,6 +303,8 @@ cd services/api && npm test && npm run test:integration
 
 # ml service (Python), in a container
 docker build --target test -t rag-ml-test services/ml && docker run --rm rag-ml-test
+# …plus the job-queue tests against compose Postgres (migrated by the API)
+docker run --rm --network rag_default -e DATABASE_URL=postgresql://rag:rag@postgres:5432/rag rag-ml-test pytest -q tests/integration
 
 # web app: BFF + client unit tests, then Postgres integration tests
 cd services/web && npm test && npm run test:integration
@@ -303,7 +313,8 @@ cd services/web && npm test && npm run test:integration
 docker run --rm -v "$PWD/eval":/eval -w /eval python:3.12-slim python -m unittest
 ```
 
-Coverage highlights: chunk boundaries/overlap/limits, parsers (heading paths, PDF pages),
+Coverage highlights: chunk boundaries/overlap/limits, parsers (heading paths, PDF pages), the
+ingestion queue (SKIP LOCKED claims, lease reclaim and fencing, retry backoff, cancellation by delete),
 RRF, SQL retrieval on seeded vectors (including cross-collection isolation and the
 double-stemming regression), prompt construction and injection escaping, citation parsing,
 cache keys (tenant, version), SSE, token forgery (expired, wrong audience/issuer/key,
@@ -329,10 +340,10 @@ Every setting has a default; see [`.env.example`](.env.example).
 ## Project layout
 
 ```
-db/migrations/        001 schema + HNSW · 002 weighted full-text · 003 row-level security · 004 web users
+db/migrations/        001 schema + HNSW · 002 weighted full-text · 003 row-level security · 004 web users · 005 ingest jobs
 services/api/src/     auth/ cache/ db/ generation/ mcp/ ml/ observability/ retrieval/ routes/ cli/
 services/web/         server/ (Fastify BFF: users, sessions, CSRF, roles, API client) · client/ (React SPA)
-services/ml/app/      parsers · chunker · embedder · pipeline · store · main (FastAPI)
+services/ml/app/      parsers · chunker · embedder · pipeline (accept/process) · store (queue SQL) · worker · main (FastAPI)
 eval/                 dataset.jsonl · run_eval.py · metrics.py · reports/
 samples/              docs/ (fictional handbook, runbook, FAQ) · queries.md
 scripts/              demo.sh · eval.sh
@@ -341,7 +352,7 @@ docs/                how-it-works.md · web.md · mcp.md · images/ · adr/ (arc
 
 ## Production next steps
 
-- **Async ingestion:** queue uploads (status `processing` already exists in the schema) so large PDFs don't hold a request open.
+- **Ingestion workers as their own deployment**, scaled on queue depth, with uploaded bytes in object storage.
 - **GPU inference** or a hosted LLM; keep Ollama for local development.
 - **Reranking:** a cross-encoder second stage where model sources allow it.
 - **Key management:** signing key from a KMS or secret manager with scheduled rotation (the JWKS already supports several keys by `kid`).

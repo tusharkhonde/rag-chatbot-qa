@@ -39,6 +39,11 @@ class Settings:
     chunk_max_tokens: int
     chunk_overlap_tokens: int
     max_upload_bytes: int
+    ingest_workers: int  # background worker threads in this process (0 = accept uploads only)
+    ingest_poll_seconds: float
+    ingest_max_attempts: int
+    ingest_retry_base_seconds: float
+    ingest_lease_seconds: int  # a claimed job not finished within this is reclaimed (worker died)
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "Settings":
@@ -64,4 +69,10 @@ class Settings:
             chunk_max_tokens=int(get("CHUNK_MAX_TOKENS")),
             chunk_overlap_tokens=int(get("CHUNK_OVERLAP_TOKENS")),
             max_upload_bytes=int(get("MAX_UPLOAD_BYTES", str(20 * 1024 * 1024))),
+            ingest_workers=int(get("INGEST_WORKERS", "1")),
+            ingest_poll_seconds=float(get("INGEST_POLL_SECONDS", "1")),
+            ingest_max_attempts=int(get("INGEST_MAX_ATTEMPTS", "3")),
+            ingest_retry_base_seconds=float(get("INGEST_RETRY_BASE_SECONDS", "10")),
+            # Longer than the slowest legitimate job (a large PDF on CPU embeddings).
+            ingest_lease_seconds=int(get("INGEST_LEASE_SECONDS", "900")),
         )

@@ -85,6 +85,8 @@ services:
       EMBEDDINGS_PROVIDER: ${EMBEDDINGS_PROVIDER:-ollama}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nomic-embed-text}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      INGEST_WORKERS: ${INGEST_WORKERS:-1}
+      INGEST_MAX_ATTEMPTS: ${INGEST_MAX_ATTEMPTS:-3}
     depends_on:
       postgres:
         condition: service_healthy

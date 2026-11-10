@@ -58,7 +58,7 @@ export function fakeApi() {
         listCollections: async () => (rec('listCollections')(), { collections: [{ id: 'c1', name: 'docs' }] }),
         createCollection: async (name) => (rec('createCollection')(name), { id: 'c2', name }),
         listDocuments: async (id) => (rec('listDocuments')(id), { documents: [] }),
-        upload: async (id, file) => (rec('upload')(id, file.filename), { status: 201, body: { documentId: 'd1', created: true, chunkCount: 3 } }),
+        upload: async (id, file) => (rec('upload')(id, file.filename), { status: 202, body: { documentId: 'd1', created: true, status: 'processing', chunkCount: 0 } }),
         deleteDocument: async (id, documentId) => void rec('deleteDocument')(id, documentId),
         queryStream: async (id, question) => {
           rec('queryStream')(id, question);

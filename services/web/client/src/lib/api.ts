@@ -1,4 +1,4 @@
-import type { AdminUser, Collection, DocumentSummary, Role, User } from './types';
+import type { AdminUser, Collection, DocumentStatus, DocumentSummary, Role, User } from './types';
 
 export class ApiError extends Error {
   constructor(readonly status: number, message: string) {
@@ -41,7 +41,11 @@ export const api = {
   upload: (collectionId: string, file: File) => {
     const form = new FormData();
     form.append('file', file);
-    return request<{ documentId: string; created: boolean; chunkCount: number }>('POST', `/api/collections/${collectionId}/documents`, form);
+    return request<{ documentId: string; created: boolean; status: DocumentStatus; chunkCount: number }>(
+      'POST',
+      `/api/collections/${collectionId}/documents`,
+      form,
+    );
   },
   deleteDocument: (collectionId: string, documentId: string) =>
     request<unknown>('DELETE', `/api/collections/${collectionId}/documents/${documentId}`),

@@ -91,12 +91,32 @@ class Api:
             collection_id = next(c["id"] for c in listing["collections"] if c["name"] == name)
         else:
             raise SystemExit(f"cannot create collection: {status} {body}")
+        pending = {}
         for path in sorted(docs_dir.iterdir()):
             payload, ctype = multipart("file", path.name, path.read_bytes())
             status, body = self.call("POST", f"/collections/{collection_id}/documents", payload, {"content-type": ctype})
-            if status not in (200, 201):
+            if status not in (200, 202):
                 raise SystemExit(f"upload of {path.name} failed: {status} {body}")
+            pending[body["documentId"]] = path.name
+        self.wait_until_ready(collection_id, pending)
         return collection_id
+
+    def wait_until_ready(self, collection_id: str, pending: dict[str, str], timeout_s: float = 600) -> None:
+        """Uploads are accepted (202) and indexed in the background: poll until every one is ready."""
+        deadline = time.monotonic() + timeout_s
+        while pending:
+            for document_id, name in list(pending.items()):
+                status, doc = self.call("GET", f"/collections/{collection_id}/documents/{document_id}")
+                if status != 200:
+                    raise SystemExit(f"cannot read {name}: {status} {doc}")
+                if doc["status"] == "failed":
+                    raise SystemExit(f"ingestion of {name} failed: {doc['error']}")
+                if doc["status"] == "ready":
+                    del pending[document_id]
+            if pending and time.monotonic() > deadline:
+                raise SystemExit(f"timed out waiting for {sorted(pending.values())}")
+            if pending:
+                time.sleep(1)
 
 
 # ------------------------------------------------------------------ evaluation

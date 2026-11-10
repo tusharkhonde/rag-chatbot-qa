@@ -74,7 +74,9 @@ export function createRagMcpServer(backend: RagBackend): McpServer {
       if (typeof resolved === 'string') return toolError(resolved);
       const docs = await backend.listDocuments(resolved.id);
       const text = docs.length
-        ? docs.map((d) => `- ${d.filename} (${d.chunkCount} chunks)`).join('\n')
+        ? docs
+            .map((d) => `- ${d.filename} (${d.status === 'ready' ? `${d.chunkCount} chunks` : `${d.status}, not searchable yet`})`)
+            .join('\n')
         : `Collection "${resolved.name}" has no documents.`;
       return { content: [{ type: 'text', text }] };
     },

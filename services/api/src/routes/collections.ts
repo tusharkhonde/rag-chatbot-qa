@@ -74,15 +74,32 @@ export const collectionRoutes: FastifyPluginAsync<Deps> = async (app, { repo, ml
 
       try {
         const result = await ml.ingest(req.clientId, collection.id, { filename: file.filename, mimeType: file.mimetype, data });
-        return reply.code(result.created ? 201 : 200).send({
-          documentId: result.document_id,
-          created: result.created,
-          chunkCount: result.chunk_count,
-        });
+        // 202 Accepted: parsing and embedding continue in the background; poll the Location.
+        // 200: these exact bytes were already in the collection (any status but failed).
+        const location = `/collections/${collection.id}/documents/${result.document_id}`;
+        return reply
+          .code(result.created ? 202 : 200)
+          .header('location', location)
+          .send({
+            documentId: result.document_id,
+            created: result.created,
+            status: result.status,
+            chunkCount: result.chunk_count,
+          });
       } catch (err) {
         if (err instanceof MlClientError) return reply.code(err.statusCode).send({ error: err.message });
         throw err;
       }
+    },
+  );
+
+  app.get<{ Params: { collectionId: string; documentId: string } }>(
+    '/collections/:collectionId/documents/:documentId',
+    { config: { scope: 'query' }, schema: { params: documentParams } },
+    async (req, reply) => {
+      const { collectionId, documentId } = req.params;
+      const document = await repo.getDocument(req.clientId, collectionId, documentId);
+      return document ?? reply.code(404).send({ error: 'Document not found' });
     },
   );
 

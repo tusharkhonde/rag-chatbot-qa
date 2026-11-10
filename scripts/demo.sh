@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # End-to-end demo against a running stack (docker compose up --build):
-# register a client → get a token → create a collection → upload samples → search → ask (streamed).
+# register a client → get a token → create a collection → upload samples (indexed in the
+# background) → search → ask (streamed) → delete a document.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 API="${API:-http://localhost:3000}"
@@ -19,11 +20,24 @@ token=$(curl -sf -u "$client_id:$client_secret" -d grant_type=client_credentials
 echo "${token:0:40}…"
 auth=(-H "authorization: Bearer $token")
 
-step "Create a collection and upload the sample documents"
+step "Create a collection and upload the sample documents (202 Accepted: indexed in the background)"
 collection=$(curl -sf "${auth[@]}" -H 'content-type: application/json' -d '{"name":"acme-demo"}' "$API/collections" | json 'd["id"]')
+docs=()
 for f in samples/docs/*; do
-  curl -sf "${auth[@]}" -F "file=@$f" "$API/collections/$collection/documents" |
-    json "'  $(basename "$f"): ' + str(d['chunkCount']) + ' chunks'"
+  id=$(curl -sf "${auth[@]}" -F "file=@$f" "$API/collections/$collection/documents" | json 'd["documentId"]')
+  echo "  $(basename "$f"): accepted ($id)"
+  docs+=("$id")
+done
+
+step "Wait until the ml worker has parsed, chunked and embedded each one"
+for id in "${docs[@]}"; do
+  while :; do
+    doc=$(curl -sf "${auth[@]}" "$API/collections/$collection/documents/$id")
+    status=$(echo "$doc" | json 'd["status"]')
+    [ "$status" = processing ] || break
+    sleep 1
+  done
+  echo "$doc" | json "'  ' + d['filename'] + ': ' + d['status'] + ', ' + str(d['chunkCount']) + ' chunks' + (' (' + d['error'] + ')' if d['error'] else '')"
 done
 
 step "Hybrid search (retrieval only): 'NimbusUnderReplicated'"
@@ -61,6 +75,10 @@ ask() {
 ask "How do I roll back a bad deploy, and does it need approval?"
 ask "What is the CEO of Acme Orbital paid?"
 ask "How do I roll back a bad deploy, and does it need approval?"   # answer cache hit
+
+step "Delete a document: its chunks go with it, and cached answers for the collection are invalidated"
+curl -sf -o /dev/null -w '  DELETE → %{http_code}\n' -X DELETE "${auth[@]}" "$API/collections/$collection/documents/${docs[0]}"
+curl -sf "${auth[@]}" "$API/collections/$collection/documents" | json "'  remaining: ' + ', '.join(x['filename'] for x in d['documents'])"
 
 step "Observability"
 curl -sf "$API/ready" | json "'  ready: ' + str(d['ready']) + '  ' + str({k: v['ok'] for k, v in d['checks'].items()})"

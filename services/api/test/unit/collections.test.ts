@@ -20,6 +20,10 @@ function fakeRepo(): Repo {
     getCollection: vi.fn(async (clientId, id) => (clientId === CLIENT_A && id === OWNED ? collection : null)),
     listDocuments: vi.fn(async () => []),
     getChunk: vi.fn(async () => null),
+    getDocument: vi.fn(async (clientId, collectionId, documentId) =>
+      clientId === CLIENT_A && collectionId === OWNED && documentId === DOC
+        ? { id: DOC, filename: 'a.md', mimeType: 'text/markdown', status: 'failed' as const, error: 'No extractable text', chunkCount: 0, createdAt: 'now' }
+        : null),
     deleteDocument: vi.fn(async (clientId, collectionId, documentId) =>
       clientId === CLIENT_A && collectionId === OWNED && documentId === DOC),
   };
@@ -28,7 +32,7 @@ function fakeRepo(): Repo {
 function setup(ml: Partial<MlClient> = {}, scopes?: Parameters<typeof fakeAuth>[1]) {
   const repo = fakeRepo();
   const mlClient: MlClient = {
-    ingest: vi.fn(async () => ({ document_id: 'doc-1', created: true, chunk_count: 3 })),
+    ingest: vi.fn(async () => ({ document_id: 'doc-1', created: true, status: 'processing' as const, chunk_count: 0 })),
     embed: vi.fn(),
     info: vi.fn(),
     ...ml,
@@ -66,11 +70,12 @@ describe('collections routes', () => {
     expect((await app.inject({ method: 'POST', url: '/collections', headers: auth, payload: { name: '../etc' } })).statusCode).toBe(400);
   });
 
-  it('forwards an upload for an owned collection to the ml service', async () => {
+  it('forwards an upload for an owned collection to the ml service and answers 202 + Location', async () => {
     const { app, ml } = setup();
     const res = await app.inject({ method: 'POST', url: `/collections/${OWNED}/documents`, headers: auth, payload: upload() });
-    expect(res.statusCode).toBe(201);
-    expect(res.json()).toEqual({ documentId: 'doc-1', created: true, chunkCount: 3 });
+    expect(res.statusCode).toBe(202);
+    expect(res.json()).toEqual({ documentId: 'doc-1', created: true, status: 'processing', chunkCount: 0 });
+    expect(res.headers.location).toBe(`/collections/${OWNED}/documents/doc-1`);
     const [clientId, collectionId, file] = vi.mocked(ml.ingest).mock.calls[0]!;
     expect(clientId).toBe(CLIENT_A);
     expect(collectionId).toBe(OWNED);
@@ -86,10 +91,10 @@ describe('collections routes', () => {
   });
 
   it('returns 200 when the same file was already ingested', async () => {
-    const { app } = setup({ ingest: async () => ({ document_id: 'doc-1', created: false, chunk_count: 3 }) });
+    const { app } = setup({ ingest: async () => ({ document_id: 'doc-1', created: false, status: 'ready' as const, chunk_count: 3 }) });
     const res = await app.inject({ method: 'POST', url: `/collections/${OWNED}/documents`, headers: auth, payload: upload() });
     expect(res.statusCode).toBe(200);
-    expect(res.json().created).toBe(false);
+    expect(res.json()).toMatchObject({ created: false, status: 'ready', chunkCount: 3 });
   });
 
   it('passes ml validation errors (e.g. 415 unsupported type) through to the caller', async () => {
@@ -132,6 +137,14 @@ describe('collections routes', () => {
     expect(res.headers['www-authenticate']).toContain('scope="documents:write"');
     expect(ml.ingest).not.toHaveBeenCalled();
     expect((await app.inject({ method: 'GET', url: '/collections', headers: auth })).statusCode).toBe(200);
+  });
+
+  it('GET /collections/:id/documents/:documentId returns status and error, 404 otherwise', async () => {
+    const { app } = setup();
+    const res = await app.inject({ method: 'GET', url: `/collections/${OWNED}/documents/${DOC}`, headers: auth });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ status: 'failed', error: 'No extractable text' });
+    expect((await app.inject({ method: 'GET', url: `/collections/${FOREIGN}/documents/${DOC}`, headers: auth })).statusCode).toBe(404);
   });
 
   describe('DELETE /collections/:id/documents/:documentId', () => {

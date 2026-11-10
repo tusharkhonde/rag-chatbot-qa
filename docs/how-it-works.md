@@ -29,6 +29,7 @@ headings as a reference.
   - [5.17 Testing strategy](#517-testing-strategy)
   - [5.18 MCP: exposing retrieval to AI applications](#518-mcp-exposing-retrieval-to-ai-applications)
   - [5.19 The web app: backend-for-frontend, sessions and CSRF](#519-the-web-app-backend-for-frontend-sessions-and-csrf)
+  - [5.20 Background jobs: a queue in Postgres](#520-background-jobs-a-queue-in-postgres)
 - [6. Bugs found while building it](#6-bugs-found-while-building-it)
 - [7. Tradeoffs and what changes at scale](#7-tradeoffs-and-what-changes-at-scale)
 - [8. Questions this design should be able to answer](#8-questions-this-design-should-be-able-to-answer)
@@ -115,14 +116,18 @@ exist as far as this tenant is concerned: 404. This check is the tenancy boundar
 posts it to `ml /ingest` with the tenant and collection ids (`services/api/src/ml/client.ts`).
 Buffering rather than streaming is fine here: `ml` needs the whole file to hash it anyway.
 
-**4. Hash and deduplicate** (`services/ml/app/pipeline.py`). SHA-256 of the bytes. If this
-collection already has a document with that hash, return it immediately (`created: false`,
-HTTP 200). This cheap check skips the expensive embedding step for re-uploads.
+**4. Hash, deduplicate and enqueue** (`services/ml/app/pipeline.py` `accept()`). Detect the
+file type (unsupported → 415 at once), then SHA-256 the bytes. If this collection already has a
+document with that hash, return it (`created: false`, HTTP 200). Otherwise insert a document
+with `status = 'processing'` **and** an `ingest_jobs` row holding the bytes, in one transaction
+as the tenant, and answer **202 Accepted** with a `Location` header. The upload request ends
+here, in milliseconds; steps 5–9 run in a background worker (section 5.20). Clients poll
+`GET /collections/:id/documents/:documentId` until `status` is `ready` (or `failed`, with `error`).
 
 **5. Parse into sections** (`services/ml/app/parsers.py`). A *section* is a run of text that
 shares one citation location:
 - PDF: one section per page (`{"page": 3}`). Pages without a text layer (scans) are skipped;
-  a document with no text at all returns 422.
+  a document with no text at all ends up `failed` ("No extractable text…").
 - Markdown: split at headings, tracking the heading hierarchy as a breadcrumb
   (`{"heading_path": ["Runbook", "Alerts", "NimbusUnderReplicated"]}`). Lines inside code
   fences are never treated as headings.
@@ -144,10 +149,11 @@ keyword index gives it extra weight.
 `/api/embed` in batches, with the `search_document: ` prefix, `truncate: false` (fail rather
 than silently cut), and the result normalized to unit length.
 
-**9. Store atomically** (`services/ml/app/store.py`). One short transaction, as the tenant:
-insert the document with `ON CONFLICT (collection_id, sha256) DO NOTHING` → insert all chunks →
-`collections.version += 1`. Either all of it happens or none of it does. The version bump is
-what invalidates cached answers for this collection (section 5.10).
+**9. Store atomically** (`services/ml/app/store.py` `complete_document()`). One short
+transaction: lock the job row → as the tenant, insert all chunks, set the document `ready`,
+`collections.version += 1` → delete the job. Either all of it happens or none of it does.
+Chunks become searchable only at this commit, so search never sees half a document. The
+version bump is what invalidates cached answers for this collection (section 5.10).
 
 Note the ordering: the slow step (embedding) happens **before** the transaction opens. A
 transaction held open during a multi-second model call would pin a database connection and
@@ -687,6 +693,54 @@ Full guide: [web.md](web.md). The concepts:
 - **Streaming in the browser:** EventSource can't POST or send headers, so the SPA parses SSE from a
   `fetch` stream, buffering partial messages and decoding UTF-8 in streaming mode.
 
+### 5.20 Background jobs: a queue in Postgres
+
+Parsing and embedding a large PDF on CPU takes minutes. Doing that inside the upload request
+holds the connection open (proxies time out), shows no progress, and throws the work away if the
+client disconnects. So uploads are **accepted** (202) and **processed** by a worker. ADR:
+[0009](adr/0009-async-ingestion.md).
+
+**The queue is a table** (`ingest_jobs`, migration 005), and that's a deliberate choice:
+- The job and its document are created **in the same transaction**. With a separate broker you
+  have a *dual write*: commit the row, then publish the message, and a crash in between leaves a
+  document that will never be processed (the fix is the *transactional outbox* pattern, which is
+  this same table plus a relay).
+- Redis here is an evicting LRU cache: a queued job could be evicted.
+
+**Claiming without double work: `FOR UPDATE SKIP LOCKED`.**
+```sql
+UPDATE ingest_jobs SET locked_at = now(), attempts = attempts + 1
+ WHERE document_id = (SELECT document_id FROM ingest_jobs
+                       WHERE run_after <= now() AND (locked_at IS NULL OR locked_at < now() - lease)
+                       ORDER BY created_at LIMIT 1
+                       FOR UPDATE SKIP LOCKED)
+RETURNING …;
+```
+Plain `FOR UPDATE` would make the second worker *wait* for the first worker's row; `SKIP LOCKED`
+makes it take the next row instead, so N workers claim N different jobs with no coordination.
+
+**Leases, not long transactions.** The claim commits immediately; `locked_at` is a lease. The
+slow work runs with no transaction open (the same rule as step 9). If a worker dies, its lease
+expires (`INGEST_LEASE_SECONDS`) and another worker reclaims the job. `attempts` doubles as a
+**fencing token**: the finishing transaction locks the job *with the attempts value it claimed*,
+so a slow worker whose lease was taken over can't overwrite the new owner's result.
+
+**Retries.**
+- **Permanent errors** (unparseable file, no text) fail at once. Retrying the same bytes gives
+  the same result.
+- **Transient errors** (embedder down, timeouts) retry with **exponential backoff**
+  (10 s, 20 s, …), and fail after `INGEST_MAX_ATTEMPTS`. Backoff stops a struggling dependency
+  from being hammered.
+- The document records `status = failed` and the `error`, which the admin page shows.
+- Re-uploading the same bytes replaces a failed document, which is how a user retries.
+
+**Cancellation is a foreign key.** Deleting a document cascades to its job. A worker that
+finishes afterwards finds no job row to lock and discards its result.
+
+**Delivery semantics.** This is *at-least-once* processing: a job can be attempted more than
+once (a crash after embedding, before commit). It's safe because the final step is idempotent
+in effect: it either commits everything once, or finds the job gone.
+
 ## 6. Bugs found while building it
 
 These make good stories because each one was silent: nothing crashed.
@@ -713,7 +767,7 @@ These make good stories because each one was silent: nothing crashed.
 
 | Area | Current choice | What changes at scale |
 |---|---|---|
-| Ingestion | Synchronous in the request | Queue (the schema already has `status = processing`), workers, retries |
+| Ingestion | Postgres job queue, worker threads in `ml` | Workers as their own deployment scaled on queue depth; file bytes in object storage; a broker + outbox at high volume |
 | Inference | CPU Ollama in Docker | GPU nodes or a hosted API; batching; keep local models for development |
 | Vector store | One Postgres | Partition chunks by tenant, read replicas, or a dedicated vector DB past tens of millions of vectors |
 | Reranking | RRF only | Cross-encoder or LLM reranker on the top 20–50 |
@@ -809,4 +863,10 @@ role on every admin route, and chat users' API tokens can't write at all.
 
 **What's the weakest part of this system?** Generation speed on CPU, and a small evaluation set
 written from the documents themselves (it favours keyword search). Next steps: a paraphrased
-evaluation set from real questions, reranking, and async ingestion.
+evaluation set from real questions, and reranking.
+
+**Why a job table in Postgres rather than a message broker?** The job is created in the same
+transaction as its document, so there's no dual-write gap. `FOR UPDATE SKIP LOCKED` gives
+concurrent workers distinct jobs, leases recover from crashed workers, and cancellation is a
+foreign-key cascade. A broker wins at high volume or fan-out, and then needs an outbox to
+publish reliably.

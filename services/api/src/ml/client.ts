@@ -1,6 +1,8 @@
 export interface IngestResult {
   document_id: string;
   created: boolean;
+  /** New uploads are `processing` until the ml worker finishes them (poll the document). */
+  status: 'processing' | 'ready' | 'failed';
   chunk_count: number;
 }
 
@@ -45,8 +47,9 @@ export function createMlClient(baseUrl: string, fetchImpl: typeof fetch = fetch)
       form.append('client_id', clientId);
       form.append('collection_id', collectionId);
       form.append('file', new Blob([new Uint8Array(file.data)], { type: file.mimeType }), file.filename);
-      // Ingest embeds every chunk, so a large PDF can take a while; still bound it.
-      return call('/ingest', { method: 'POST', body: form }, 300_000);
+      // Accepting only hashes and enqueues (parsing and embedding run in the ml worker), but the
+      // upload itself can be up to 20 MB, so allow for a slow transfer.
+      return call('/ingest', { method: 'POST', body: form }, 60_000);
     },
 
     embed(texts, kind) {

@@ -109,6 +109,12 @@ describe('document deletion', () => {
     expect(await repo.deleteDocument(tenantA, collection.id, documentId)).toBe(false); // already gone
   });
 
+  it("reads a document's status, and never another tenant's", async () => {
+    const { collection, documentId } = await seedDocument(tenantB, 'b-docs');
+    expect(await repo.getDocument(tenantB, collection.id, documentId)).toMatchObject({ status: 'ready', error: null, chunkCount: 2 });
+    expect(await repo.getDocument(tenantA, collection.id, documentId)).toBeNull();
+  });
+
   it("can't delete another tenant's document, even with the right ids", async () => {
     const { collection, documentId } = await seedDocument(tenantB, 'b-docs');
     const before = (await repo.getCollection(tenantB, collection.id))!.version;

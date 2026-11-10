@@ -12,7 +12,9 @@ export interface DocumentSummary {
   id: string;
   filename: string;
   mimeType: string;
-  status: string;
+  status: 'processing' | 'ready' | 'failed';
+  /** Why ingestion failed (status = failed), else null. */
+  error: string | null;
   chunkCount: number;
   createdAt: string;
 }
@@ -35,12 +37,15 @@ export interface Repo {
   listCollections(clientId: string): Promise<Collection[]>;
   getCollection(clientId: string, collectionId: string): Promise<Collection | null>;
   listDocuments(clientId: string, collectionId: string): Promise<DocumentSummary[]>;
+  getDocument(clientId: string, collectionId: string, documentId: string): Promise<DocumentSummary | null>;
   getChunk(clientId: string, chunkId: string): Promise<ChunkDetail | null>;
   /** Deletes a document (its chunks cascade) and bumps the collection version. false = not found. */
   deleteDocument(clientId: string, collectionId: string, documentId: string): Promise<boolean>;
 }
 
 const COLLECTION_COLUMNS = `id, name, version, created_at AS "createdAt"`;
+const DOCUMENT_COLUMNS = `d.id, d.filename, d.mime_type AS "mimeType", d.status, d.error,
+                d.chunk_count AS "chunkCount", d.created_at AS "createdAt"`;
 
 export function createRepo(pool: pg.Pool): Repo {
   return {
@@ -72,8 +77,7 @@ export function createRepo(pool: pg.Pool): Repo {
 
     async listDocuments(clientId, collectionId) {
       const { rows } = await withTenant(pool, clientId, (db) => db.query<DocumentSummary>(
-        `SELECT d.id, d.filename, d.mime_type AS "mimeType", d.status,
-                d.chunk_count AS "chunkCount", d.created_at AS "createdAt"
+        `SELECT ${DOCUMENT_COLUMNS}
            FROM documents d
            JOIN collections c ON c.id = d.collection_id
           WHERE d.collection_id = $1 AND c.client_id = $2
@@ -81,6 +85,17 @@ export function createRepo(pool: pg.Pool): Repo {
         [collectionId, clientId],
       ));
       return rows;
+    },
+
+    async getDocument(clientId, collectionId, documentId) {
+      const { rows } = await withTenant(pool, clientId, (db) => db.query<DocumentSummary>(
+        `SELECT ${DOCUMENT_COLUMNS}
+           FROM documents d
+           JOIN collections c ON c.id = d.collection_id
+          WHERE d.id = $1 AND d.collection_id = $2 AND c.client_id = $3`,
+        [documentId, collectionId, clientId],
+      ));
+      return rows[0] ?? null;
     },
 
     async getChunk(clientId, chunkId) {

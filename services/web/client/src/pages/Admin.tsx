@@ -23,9 +23,17 @@ export function Admin({ currentUser }: { currentUser: User }) {
 
 interface UploadRow {
   name: string;
-  status: 'queued' | 'uploading' | 'indexed' | 'duplicate' | 'error';
+  status: 'queued' | 'uploading' | 'accepted' | 'duplicate' | 'error';
   detail?: string;
 }
+
+const POLL_MS = 2000;
+
+const STATUS_LABEL: Record<DocumentSummary['status'], string> = {
+  processing: 'Processing…',
+  ready: 'Ready',
+  failed: 'Failed',
+};
 
 const ACCEPT = '.pdf,.md,.markdown,.txt';
 
@@ -52,6 +60,16 @@ function Documents() {
     loadDocuments(selected).catch((e) => setError(e.message));
   }, [selected, loadDocuments]);
 
+  // Ingestion runs in the background: while any document is still processing, refresh the list.
+  const processing = documents.some((d) => d.status === 'processing');
+  useEffect(() => {
+    if (!processing || !selected) return;
+    const timer = setInterval(() => {
+      loadDocuments(selected).catch((e) => setError(e.message));
+    }, POLL_MS);
+    return () => clearInterval(timer);
+  }, [processing, selected, loadDocuments]);
+
   async function create(e: FormEvent) {
     e.preventDefault();
     setError('');
@@ -65,7 +83,8 @@ function Documents() {
     }
   }
 
-  // Sequential uploads: each file is parsed, chunked and embedded server-side before the next.
+  // Uploads return as soon as the server has accepted the file (202); parsing, chunking and
+  // embedding continue in the background and the table below shows each document's status.
   async function uploadFiles(files: File[]) {
     if (!selected || !files.length) return;
     const start = uploads.length;
@@ -75,7 +94,8 @@ function Documents() {
       set(i, { status: 'uploading' });
       try {
         const res = await api.upload(selected, file);
-        set(i, res.created ? { status: 'indexed', detail: `${res.chunkCount} chunks` } : { status: 'duplicate', detail: 'already in this collection' });
+        set(i, res.created ? { status: 'accepted', detail: 'indexing in the background' } : { status: 'duplicate', detail: 'already in this collection' });
+        await loadDocuments(selected);
       } catch (err) {
         set(i, { status: 'error', detail: (err as Error).message });
       }
@@ -159,6 +179,7 @@ function Documents() {
           <thead>
             <tr>
               <th>File</th>
+              <th>Status</th>
               <th>Chunks</th>
               <th>Added</th>
               <th />
@@ -168,7 +189,13 @@ function Documents() {
             {documents.map((d) => (
               <tr key={d.id}>
                 <td>{d.filename}</td>
-                <td>{d.chunkCount}</td>
+                <td>
+                  <span className={`doc-status ${d.status}`} title={d.error ?? undefined}>
+                    {STATUS_LABEL[d.status]}
+                  </span>
+                  {d.status === 'failed' && d.error && <div className="muted small">{d.error}</div>}
+                </td>
+                <td>{d.status === 'ready' ? d.chunkCount : '–'}</td>
                 <td>{new Date(d.createdAt).toLocaleString()}</td>
                 <td>
                   <button className="link danger" onClick={() => void remove(d)} aria-label={`Delete ${d.filename}`}>
@@ -179,7 +206,7 @@ function Documents() {
             ))}
             {documents.length === 0 && (
               <tr>
-                <td colSpan={4} className="muted">
+                <td colSpan={5} className="muted">
                   No documents yet.
                 </td>
               </tr>

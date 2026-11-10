@@ -58,6 +58,11 @@ h3:first-child { margin-top: 0; }
 .secondary { background: transparent; color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px 14px; white-space: nowrap; }
 .link { background: none; border: 0; color: var(--accent); padding: 0; }
 .link.danger { color: var(--err); }
+.doc-status { font-weight: 500; }
+.doc-status.processing { color: var(--warn); }
+.doc-status.ready { color: var(--ok); }
+.doc-status.failed { color: var(--err); }
+.small { font-size: 0.85em; }
 .muted { color: var(--muted); }
 .error { color: var(--err); margin: 8px 0; }
 .ok { color: var(--ok); margin: 8px 0; }
@@ -134,7 +139,7 @@ label { display: flex; flex-direction: column; gap: 4px; font-size: 0.9em; color
 .dropzone input { display: none; }
 .uploads { list-style: none; padding: 0; margin: 0 0 8px; font-size: 0.9em; }
 .uploads li { display: flex; justify-content: space-between; gap: 12px; padding: 5px 0; border-bottom: 1px solid var(--border); }
-.uploads li.indexed span:last-child { color: var(--ok); }
+.uploads li.accepted span:last-child { color: var(--ok); }
 .uploads li.duplicate span:last-child { color: var(--warn); }
 .uploads li.error span:last-child { color: var(--err); }
 .uploads li.uploading span:last-child, .uploads li.queued span:last-child { color: var(--muted); }

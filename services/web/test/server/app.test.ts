@@ -97,7 +97,7 @@ describe('roles', () => {
     const form = new FormData();
     form.append('file', new Blob(['# hi']), 'a.md');
     const res = await app.inject({ method: 'POST', url: '/api/collections/11111111-1111-4111-8111-111111111111/documents', headers: as(s), payload: form });
-    expect(res.statusCode).toBe(201);
+    expect(res.statusCode).toBe(202); // accepted: indexing continues in the background
     expect(calls.at(-1)).toMatchObject({ role: 'admin', method: 'upload', args: ['11111111-1111-4111-8111-111111111111', 'a.md'] });
   });
 

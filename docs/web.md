@@ -279,6 +279,6 @@ services/web/
   turn, which is slow on CPU.
 - **No password reset or self-service password change** (admins create accounts with an initial
   password); no MFA. Next steps: change-password, then TOTP or WebAuthn passkeys.
-- **Uploads are synchronous and sequential** (the browser waits while each file is embedded);
-  async ingestion with progress events would suit large PDFs.
+- **Ingestion progress is polled** (every 2 s while a document is processing), not pushed. A
+  server-sent progress stream (chunks embedded so far) would be the next step for very large PDFs.
 - **One organization per deployment** (see Tenancy).
