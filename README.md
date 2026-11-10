@@ -29,6 +29,8 @@ Redis · Ollama (`qwen2.5:7b` for answers, `nomic-embed-text` for embeddings) ·
 - **Caching that invalidates itself:** query embeddings and answers in Redis, keyed on tenant,
   collection version, models and prompt version.
 - **Streaming:** answers stream over Server-Sent Events; client disconnects abort generation.
+- **Multi-turn chat:** follow-ups ("and for the raw topic?") are rewritten with recent history
+  into a standalone question (query condensation) before retrieval, caching and prompting.
 - **Background ingestion:** uploads return 202 at once; worker threads claim jobs from a
   Postgres queue (`FOR UPDATE SKIP LOCKED`, leases, retries with backoff, cancellation by delete).
 - **Observability:** Prometheus metrics per pipeline stage, token usage, cache and retrieval
@@ -89,7 +91,8 @@ DOC=$(curl -s -H "authorization: Bearer $TOKEN" -F file=@samples/docs/nimbus-que
 # 3b. Indexing runs in the background: poll until "status" is "ready" (or "failed", with "error")
 curl -s -H "authorization: Bearer $TOKEN" localhost:3000/collections/$COLLECTION/documents/$DOC | jq .status
 
-# 4. Ask (add "stream": true for Server-Sent Events)
+# 4. Ask (add "stream": true for Server-Sent Events; add "history": [{"role":"user","content":…},
+#    {"role":"assistant","content":…}] for a follow-up question in a chat)
 curl -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
   -d '{"question":"How long does the message broker keep messages?"}' \
   localhost:3000/collections/$COLLECTION/query
@@ -105,8 +108,8 @@ curl -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
 | `GET /collections/:id/documents` | `query` | List documents with status and chunk counts |
 | `GET /collections/:id/documents/:documentId` | `query` | One document's `status` (`processing` / `ready` / `failed`) and `error` |
 | `DELETE /collections/:id/documents/:documentId` | `documents:write` | Delete a document and its chunks (invalidates cached answers) |
-| `POST /collections/:id/search` | `query` | Retrieval only (`mode`: hybrid / vector / keyword) |
-| `POST /collections/:id/query` | `query` | Grounded answer with citations; `stream: true` for SSE |
+| `POST /collections/:id/search` | `query` | Retrieval only (`mode`: hybrid / vector / keyword; optional `history`) |
+| `POST /collections/:id/query` | `query` | Grounded answer with citations; `stream: true` for SSE; `history` for follow-ups |
 | `GET /chunks/:id` | `query` | One chunk's full text and source |
 | `POST /mcp` | `query` (token `aud` = `…/mcp`) | MCP over Streamable HTTP (stateless JSON-RPC) |
 | `GET /health` · `GET /ready` · `GET /metrics` | – | Liveness, readiness, Prometheus metrics |
@@ -120,6 +123,7 @@ A real response (qwen2.5:7b on CPU; the question never says "Nimbus", semantic r
   "invalidCitations": [],
   "refused": false,
   "cached": false,
+  "condensedQuestion": null,
   "model": "qwen2.5:7b",
   "usage": { "promptTokens": 818, "completionTokens": 41 },
   "retrieval": { "mode": "hybrid", "topVectorScore": 0.695, "embeddingCached": false },
@@ -159,16 +163,17 @@ Timings are in milliseconds: retrieval takes ~60 ms, generation on CPU takes the
 
 1. `onRequest`: verify the bearer JWT (RS256 pinned, issuer, audience, expiry) *before* the body is read; `preHandler` checks the route's scope.
 2. Load the collection under RLS for this tenant (another tenant's id → 404).
-3. Answer cache lookup (tenant + collection version + normalized question + models + params).
-4. Embed the query (Redis-cached), then run **vector** and **keyword** search concurrently, 20 candidates each; fuse with RRF; keep the top 5.
-5. No chunks → refuse without calling the LLM. Otherwise build the prompt: numbered `<source>` blocks within a token budget, grounding and refusal rules, document text treated as untrusted.
-6. Stream tokens from the LLM (SSE: `sources` → `delta`… → `done`); parse `[n]` citations; flag invalid ones; cache the result; record metrics and one structured log line.
+3. With `history` (a chat follow-up): rewrite the question into a standalone one with a short LLM call; it's streamed back as a `condensed` event.
+4. Answer cache lookup (tenant + collection version + normalized standalone question + models + params).
+5. Embed the query (Redis-cached), then run **vector** and **keyword** search concurrently, 20 candidates each; fuse with RRF; keep the top 5.
+6. No chunks → refuse without calling the LLM. Otherwise build the prompt: numbered `<source>` blocks within a token budget, grounding and refusal rules, document text treated as untrusted.
+7. Stream tokens from the LLM (SSE: [`condensed`] → `sources` → `delta`… → `done`); parse `[n]` citations; flag invalid ones; cache the result; record metrics and one structured log line.
 
 ## Web app
 
 | Chat user | Admin |
 |---|---|
-| Ask questions; answers stream in with numbered citations that expand to the source excerpt | Everything a chat user can do, plus create collections, upload and delete documents, create and disable users |
+| Ask questions, including follow-ups; answers stream in with numbered citations that expand to the source excerpt | Everything a chat user can do, plus create collections, upload and delete documents, create and disable users |
 
 ```
 browser (React SPA) ──HttpOnly session cookie──► web (Fastify BFF) :8080 ──JWT, scope by role──► api :3000
@@ -332,6 +337,7 @@ Every setting has a default; see [`.env.example`](.env.example).
 | `EMBEDDINGS_PROVIDER` / `EMBEDDING_MODEL` | `ollama` / `nomic-embed-text` | Or `openai` / `text-embedding-3-small` (re-ingest after switching) |
 | `RETRIEVAL_MODE` / `RETRIEVAL_TOP_K` | `hybrid` / `5` | Retriever and chunks per prompt |
 | `RETRIEVAL_HIT_THRESHOLD` | `0.6` | Hit-rate metric threshold |
+| `CONDENSE_ENABLED` / `CHAT_HISTORY_MAX_MESSAGES` | `true` / `6` | Rewrite chat follow-ups into standalone questions; how many earlier messages to consider |
 | `METRICS_TOKEN` | unset | Protect `/metrics` with a bearer token |
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` | `admin@example.com` / generated | Initial web admin, created only when no users exist |
 | `WEB_PUBLIC_ORIGIN` / `COOKIE_SECURE` | `http://localhost:8080` / `false` | The web app's origin (CSRF Origin check); set Secure cookies behind HTTPS |

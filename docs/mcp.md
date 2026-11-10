@@ -43,6 +43,11 @@ Implementation: [`services/api/src/mcp/server.ts`](../services/api/src/mcp/serve
   - `structuredContent` (typed results, validated by the declared `outputSchema`) for programmatic clients.
 - **`ask_question {collection, question}`**: the full RAG pipeline (local LLM) returns an answer with citations. It's slow on CPU. The server `instructions` tell the host model to prefer `search_documents` and write the answer itself.
 
+The tools take no chat history, unlike the REST `query` endpoint and the web chat, which
+rewrite follow-up questions using earlier turns (query condensation). An MCP host's model already
+holds the conversation and writes each tool argument itself, so it sends a standalone query;
+condensing again would only add a slow LLM call.
+
 **Tool design for LLMs**, which differs from API design for programmers:
 - Tools accept a collection **name** as well as an id: models are good with names and bad with UUIDs.
 - Descriptions say *when* to use each tool, not just what it does.

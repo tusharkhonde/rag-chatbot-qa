@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import { api } from '../lib/api';
+import { chatHistory } from '../lib/history';
 import { renderAnswer } from '../lib/renderAnswer';
 import { readSSE } from '../lib/sse';
 import type { AnswerResult, Citation, Collection } from '../lib/types';
@@ -10,6 +11,8 @@ interface Message {
   text: string;
   status?: 'searching' | 'generating' | 'done' | 'error' | 'stopped';
   sourceCount?: number;
+  /** The standalone question the server searched with, when it rewrote a follow-up. */
+  condensed?: string;
   result?: AnswerResult;
 }
 
@@ -52,6 +55,8 @@ export function Chat() {
 
   async function ask(question: string) {
     if (!question.trim() || !collectionId || busy) return;
+    // Earlier completed turns: lets the server resolve "and what about X?" (query condensation).
+    const history = chatHistory(messages);
     const answerId = nextId + 1;
     setMessages((all) => [...all, { id: nextId, role: 'user', text: question }, { id: answerId, role: 'assistant', text: '', status: 'searching' }]);
     nextId += 2;
@@ -60,15 +65,16 @@ export function Chat() {
     const abort = new AbortController();
     abortRef.current = abort;
     try {
-      const res = await api.chat(collectionId, question, abort.signal);
+      const res = await api.chat(collectionId, question, history, abort.signal);
       if (!res.ok || !res.body) {
         const body = await res.json().catch(() => ({}));
         throw new Error((body as { error?: string }).error ?? `Request failed (${res.status})`);
       }
-      // Events arrive as: sources → delta … delta → done (or error).
+      // Events arrive as: [condensed] → sources → delta … delta → done (or error).
       for await (const { event, data } of readSSE(res.body)) {
         const payload = JSON.parse(data);
-        if (event === 'sources') update(answerId, { status: 'generating', sourceCount: payload.sources.length });
+        if (event === 'condensed') update(answerId, { condensed: payload.question });
+        else if (event === 'sources') update(answerId, { status: 'generating', sourceCount: payload.sources.length });
         else if (event === 'delta') update(answerId, (m) => ({ text: m.text + payload.text }));
         else if (event === 'done') update(answerId, { status: 'done', text: payload.answer, result: payload as AnswerResult });
         else if (event === 'error') throw new Error(payload.error);
@@ -97,7 +103,14 @@ export function Chat() {
       <div className="chat-toolbar">
         <label>
           Collection
-          <select value={collectionId} onChange={(e) => setCollectionId(e.target.value)} disabled={busy}>
+          <select
+            value={collectionId}
+            onChange={(e) => {
+              setCollectionId(e.target.value);
+              setMessages([]); // a conversation is about one collection: switching starts a new chat
+            }}
+            disabled={busy}
+          >
             {collections.length === 0 && <option value="">No collections yet</option>}
             {collections.map((c) => (
               <option key={c.id} value={c.id}>
@@ -152,7 +165,10 @@ export function Chat() {
           </button>
         )}
       </form>
-      <p className="hint">Each question is answered on its own from the documents; earlier messages aren't used as context.</p>
+      <p className="hint">
+        Follow-up questions can refer to earlier messages ("and for the raw topic?"): they're rewritten into a standalone
+        question before searching. New chat starts fresh.
+      </p>
     </div>
   );
 }
@@ -164,6 +180,11 @@ function AssistantMessage({ message: m }: { message: Message }) {
 
   return (
     <div className={`bubble assistant ${m.result?.refused ? 'refused' : ''} ${m.status === 'error' ? 'failed' : ''}`}>
+      {m.condensed && (
+        <div className="rewritten" title="Your follow-up, rewritten with the conversation's context, is what was searched for">
+          Searched for: “{m.condensed}”
+        </div>
+      )}
       {m.status === 'searching' && <div className="status">Searching the documents…</div>}
       {m.status === 'generating' && !m.text && (
         <div className="status">

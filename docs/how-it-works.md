@@ -30,6 +30,7 @@ headings as a reference.
   - [5.18 MCP: exposing retrieval to AI applications](#518-mcp-exposing-retrieval-to-ai-applications)
   - [5.19 The web app: backend-for-frontend, sessions and CSRF](#519-the-web-app-backend-for-frontend-sessions-and-csrf)
   - [5.20 Background jobs: a queue in Postgres](#520-background-jobs-a-queue-in-postgres)
+  - [5.21 Multi-turn chat: query condensation](#521-multi-turn-chat-query-condensation)
 - [6. Bugs found while building it](#6-bugs-found-while-building-it)
 - [7. Tradeoffs and what changes at scale](#7-tradeoffs-and-what-changes-at-scale)
 - [8. Questions this design should be able to answer](#8-questions-this-design-should-be-able-to-answer)
@@ -741,6 +742,50 @@ finishes afterwards finds no job row to lock and discards its result.
 once (a crash after embedding, before commit). It's safe because the final step is idempotent
 in effect: it either commits everything once, or finds the job gone.
 
+### 5.21 Multi-turn chat: query condensation
+
+Retrieval sees one string. In a conversation, the follow-up "and what about the raw telemetry
+topic?" has no subject: the subject ("how long Nimbus Queue keeps messages") was in the previous
+turn. Searched as-is on the sample corpus, it pulls ground-station FAQ chunks that mention
+telemetry instead of the Nimbus Queue runbook.
+
+**The fix: rewrite, then retrieve** (`services/api/src/generation/condense.ts`). When a request
+carries `history`, one short LLM call rewrites the latest message into a standalone question:
+
+```
+<conversation>
+User: How long does Nimbus Queue keep messages?
+Assistant: Messages are retained for 72 hours by default.
+</conversation>
+Latest message: and what about the raw telemetry topic?
+→ "How long does Nimbus Queue keep messages in the raw telemetry topic?"
+```
+
+That standalone question then drives everything downstream: retrieval, the answer prompt and
+the **answer-cache key**. Two conversations that arrive at the same question share a cached
+answer; the same words in different conversations don't collide.
+
+Details that matter:
+- **Only follow-ups pay.** No history means no extra call. With history, the call is small
+  (temperature 0, ≤128 output tokens, the last 6 messages, assistant answers trimmed to ~500
+  characters with their `[n]` markers removed, since those numbers mean nothing outside the
+  original prompt).
+- **History is untrusted input**, like document text: it's delimited and escaped, and the
+  instructions say to ignore instructions inside it. The worst a malicious history can do is
+  produce a bad search query, and the answer step still only uses retrieved sources.
+- **Output hygiene:** models add labels, quotes or explanations. The first line is kept, labels
+  and quotes stripped, and an empty result falls back to the original question.
+- **Visibility:** the API streams a `condensed` event before `sources`, and the result carries
+  `condensedQuestion`, so users (and logs) can see what was actually searched.
+  `timings.condense` shows the cost.
+- **`/search` accepts `history` too**, returning `condensedQuery`, so the rewrite can be inspected
+  and evaluated without generating an answer.
+- **Why not embed the whole conversation instead?** Concatenating history into the query vector
+  drags in every earlier topic. Rewriting keeps the query about one thing.
+
+The web app keeps the conversation in the browser tab and sends the last completed turns with
+each question. The API is stateless about conversations, so any replica can serve any turn.
+
 ## 6. Bugs found while building it
 
 These make good stories because each one was silent: nothing crashed.
@@ -796,6 +841,10 @@ truncate, losing the tail. Here chunk sizes use a pessimistic estimate, and Olla
 **Why hybrid search?** Vector search handles paraphrase, keyword search handles exact
 identifiers; each fails where the other succeeds. RRF merges them by rank, which needs no score
 normalization.
+
+**How do follow-up questions work in a chat?** The client sends recent turns as history; one
+short LLM call rewrites the follow-up into a standalone question, which drives retrieval, the
+prompt and the cache key. First questions skip the call. History is treated as untrusted input.
 
 **How do you stop the model making things up?** Retrieval quality first; then a prompt that
 restricts answers to numbered sources with a fixed refusal; low temperature; skipping the LLM

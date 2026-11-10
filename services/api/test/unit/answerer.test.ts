@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { memoryCache } from '../../src/cache/cache.js';
 import type { Collection } from '../../src/db/repo.js';
 import { createAnswerer, normalizeForCache, type AnswerEvent } from '../../src/generation/answerer.js';
+import type { Condenser, HistoryMessage } from '../../src/generation/condense.js';
 import type { LlmClient, LlmEvent } from '../../src/generation/llm.js';
 import { REFUSAL } from '../../src/generation/prompt.js';
 import type { RetrieveResult, Retriever } from '../../src/retrieval/retriever.js';
@@ -32,13 +33,26 @@ function fakeLlm(tokens: string[]): LlmClient & { calls: number } {
   return llm;
 }
 
-function setup(tokens = ['Run ', 'rollback [1]', ' and see [9].'], chunks = 2) {
+/** Fake condenser: maps a follow-up to a fixed standalone question (or leaves it unchanged). */
+function fakeCondenser(rewrite: Record<string, string>): Condenser & { calls: number } {
+  const condenser = {
+    calls: 0,
+    async condense(history: HistoryMessage[], question: string) {
+      condenser.calls++;
+      const out = rewrite[question] ?? question;
+      return { question: out, condensed: out !== question, usage: { promptTokens: 40, completionTokens: 10 } };
+    },
+  };
+  return condenser;
+}
+
+function setup(tokens = ['Run ', 'rollback [1]', ' and see [9].'], chunks = 2, condenser?: Condenser) {
   const retriever: Retriever = { retrieve: vi.fn(async () => retrieval(chunks)) };
   const llm = fakeLlm(tokens);
   const cache = memoryCache();
   const answerer = createAnswerer({
     retriever, llm, cache, embeddingModelId: async () => 'ollama:nomic-embed-text',
-    maxContextTokens: 3000, cacheTtlSeconds: 60,
+    maxContextTokens: 3000, cacheTtlSeconds: 60, condenser,
   });
   return { answerer, retriever, llm, cache };
 }
@@ -104,5 +118,51 @@ describe('answerer', () => {
 
   it('normalizes questions for the cache key', () => {
     expect(normalizeForCache('  What IS  the rollback command?? ')).toBe('what is the rollback command');
+  });
+
+  describe('multi-turn chat (query condensation)', () => {
+    const history: HistoryMessage[] = [
+      { role: 'user', content: 'How long does Nimbus keep messages?' },
+      { role: 'assistant', content: '72 hours [1].' },
+    ];
+    const standalone = 'How long does the Nimbus telemetry.raw topic keep messages?';
+
+    it('retrieves and prompts with the standalone question, and says so in an event', async () => {
+      const condenser = fakeCondenser({ 'and the raw topic?': standalone });
+      const { answerer, retriever } = setup(undefined, 2, condenser);
+      const events: AnswerEvent[] = [];
+      for await (const e of answerer.stream({ ...req('and the raw topic?'), history })) events.push(e);
+
+      expect(events[0]).toEqual({ type: 'condensed', question: standalone });
+      expect(vi.mocked(retriever.retrieve).mock.calls[0]![0].query).toBe(standalone);
+      const done = (events.at(-1) as Extract<AnswerEvent, { type: 'done' }>).result;
+      expect(done.condensedQuestion).toBe(standalone);
+      expect(done.timings).toHaveProperty('condense');
+      expect(done.usage).toEqual({ promptTokens: 160, completionTokens: 13 }); // answer + condensation tokens
+    });
+
+    it('never calls the condenser on a first question', async () => {
+      const condenser = fakeCondenser({});
+      const { answerer } = setup(undefined, 2, condenser);
+      const result = await answerer.answer(req());
+      expect(condenser.calls).toBe(0);
+      expect(result.condensedQuestion).toBeNull();
+    });
+
+    it('keys the answer cache on the standalone question', async () => {
+      const condenser = fakeCondenser({ 'and the raw topic?': standalone });
+      const { answerer, llm } = setup(undefined, 2, condenser);
+      await answerer.answer({ ...req('and the raw topic?'), history });
+      // Asked directly as a standalone question: same answer, served from cache.
+      const direct = await answerer.answer(req(standalone));
+      expect(direct.cached).toBe(true);
+      expect(llm.calls).toBe(1);
+    });
+
+    it('ignores history when no condenser is configured', async () => {
+      const { answerer, retriever } = setup();
+      await answerer.answer({ ...req('and the raw topic?'), history });
+      expect(vi.mocked(retriever.retrieve).mock.calls[0]![0].query).toBe('and the raw topic?');
+    });
   });
 });

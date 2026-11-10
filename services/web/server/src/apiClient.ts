@@ -7,6 +7,11 @@ import type { Role } from './users.js';
  */
 export const SCOPES_BY_ROLE: Record<Role, string> = { admin: 'documents:write query', user: 'query' };
 
+export interface ChatTurn {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
 export class ApiError extends Error {
   constructor(
     readonly status: number,
@@ -23,7 +28,7 @@ export interface RagApi {
   upload(collectionId: string, file: { filename: string; mimeType: string; data: Buffer }): Promise<{ status: number; body: unknown }>;
   deleteDocument(collectionId: string, documentId: string): Promise<void>;
   /** Starts a streamed answer; the caller pipes the SSE body through. */
-  queryStream(collectionId: string, question: string, signal: AbortSignal): Promise<Response>;
+  queryStream(collectionId: string, question: string, history: ChatTurn[], signal: AbortSignal): Promise<Response>;
 }
 
 /** The BFF is one OAuth client of the API; it keeps one cached token per scope set. */
@@ -91,8 +96,11 @@ export function createApiClient(opts: {
         const res = await send(`/collections/${encodeURIComponent(id)}/documents/${encodeURIComponent(documentId)}`, { method: 'DELETE' });
         if (!res.ok) throw new ApiError(res.status, await res.json().catch(() => null));
       },
-      queryStream: (id, question, signal) =>
-        send(`/collections/${encodeURIComponent(id)}/query`, { ...post({ question, stream: true }), signal }),
+      queryStream: (id, question, history, signal) =>
+        send(`/collections/${encodeURIComponent(id)}/query`, {
+          ...post(history.length ? { question, history, stream: true } : { question, stream: true }),
+          signal,
+        }),
     };
   }
 

@@ -1,3 +1,4 @@
+import type { HistoryMessage } from './history';
 import type { AdminUser, Collection, DocumentStatus, DocumentSummary, Role, User } from './types';
 
 export class ApiError extends Error {
@@ -56,12 +57,12 @@ export const api = {
   setDisabled: (id: string, disabled: boolean) => request<{ user: AdminUser }>('PATCH', `/api/admin/users/${id}`, { disabled }),
 
   /** Streamed answer. Returns the raw response; read it with readSSE(). */
-  chat: (collectionId: string, question: string, signal: AbortSignal) =>
+  chat: (collectionId: string, question: string, history: HistoryMessage[], signal: AbortSignal) =>
     fetch('/api/chat', {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'content-type': 'application/json', 'x-csrf-token': csrfToken, accept: 'text/event-stream' },
-      body: JSON.stringify({ collectionId, question }),
+      body: JSON.stringify({ collectionId, question, history }),
       signal,
     }),
 };

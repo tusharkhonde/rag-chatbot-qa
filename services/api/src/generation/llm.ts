@@ -12,9 +12,15 @@ export interface Usage {
 
 export type LlmEvent = { type: 'delta'; text: string } | { type: 'usage'; usage: Usage };
 
+/** Per-call overrides of the client's defaults (e.g. temperature 0 for query condensation). */
+export interface CallOptions {
+  temperature?: number;
+  maxTokens?: number;
+}
+
 export interface LlmClient {
   readonly model: string;
-  stream(messages: ChatMessage[], signal?: AbortSignal): AsyncIterable<LlmEvent>;
+  stream(messages: ChatMessage[], signal?: AbortSignal, options?: CallOptions): AsyncIterable<LlmEvent>;
 }
 
 export interface LlmOptions {
@@ -33,15 +39,15 @@ export function createLlmClient(opts: LlmOptions): LlmClient {
   const client = new OpenAI({ baseURL: opts.baseURL, apiKey: opts.apiKey, timeout: 300_000, maxRetries: 1 });
   return {
     model: opts.model,
-    async *stream(messages, signal) {
+    async *stream(messages, signal, options) {
       const stream = await client.chat.completions.create(
         {
           model: opts.model,
           messages,
           stream: true,
           // Low temperature: we want faithful extraction from sources, not creativity.
-          temperature: opts.temperature,
-          max_tokens: opts.maxTokens,
+          temperature: options?.temperature ?? opts.temperature,
+          max_tokens: options?.maxTokens ?? opts.maxTokens,
           // Ask for a final chunk with token counts (supported by OpenAI and Ollama).
           stream_options: { include_usage: true },
         },

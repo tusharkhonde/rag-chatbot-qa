@@ -8,6 +8,7 @@ import { migrate } from './db/migrate.js';
 import { createPool } from './db/pool.js';
 import { createRepo } from './db/repo.js';
 import { createAnswerer } from './generation/answerer.js';
+import { createCondenser } from './generation/condense.js';
 import { createLlmClient } from './generation/llm.js';
 import { createMlClient } from './ml/client.js';
 import { createMetrics } from './observability/metrics.js';
@@ -26,15 +27,20 @@ const queryEmbedder = createQueryEmbedder(ml, cache);
 const retriever = createRetriever(createSearchStore(pool, config.HNSW_EF_SEARCH), queryEmbedder, {
   candidates: config.RETRIEVAL_CANDIDATES,
 });
+const llm = createLlmClient({
+  baseURL: config.LLM_BASE_URL,
+  apiKey: config.LLM_API_KEY,
+  model: config.LLM_MODEL,
+  temperature: config.LLM_TEMPERATURE,
+  maxTokens: config.LLM_MAX_TOKENS,
+});
+const condenser = config.CONDENSE_ENABLED
+  ? createCondenser(llm, { maxMessages: config.CHAT_HISTORY_MAX_MESSAGES, maxTokens: config.CONDENSE_MAX_TOKENS })
+  : undefined;
 const answerer = createAnswerer({
   retriever,
-  llm: createLlmClient({
-    baseURL: config.LLM_BASE_URL,
-    apiKey: config.LLM_API_KEY,
-    model: config.LLM_MODEL,
-    temperature: config.LLM_TEMPERATURE,
-    maxTokens: config.LLM_MAX_TOKENS,
-  }),
+  llm,
+  condenser,
   cache,
   embeddingModelId: queryEmbedder.modelId,
   maxContextTokens: config.MAX_CONTEXT_TOKENS,
@@ -65,6 +71,7 @@ const app = buildApp({
   ml,
   retriever,
   answerer,
+  condenser,
   clients: createClientStore(pool),
   tokens,
   metrics: createMetrics({ hitThreshold: config.RETRIEVAL_HIT_THRESHOLD }),

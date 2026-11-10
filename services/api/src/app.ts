@@ -9,6 +9,7 @@ import type { TokenService } from './auth/tokens.js';
 import type { Config } from './config.js';
 import type { Repo } from './db/repo.js';
 import type { Answerer } from './generation/answerer.js';
+import type { Condenser } from './generation/condense.js';
 import type { MlClient } from './ml/client.js';
 import type { Metrics } from './observability/metrics.js';
 import type { ReadinessCheck } from './observability/readiness.js';
@@ -26,6 +27,8 @@ export interface AppDeps {
   ml: MlClient;
   retriever: Retriever;
   answerer: Answerer;
+  /** Rewrites chat follow-ups into standalone questions (also used by /search with history). */
+  condenser?: Condenser;
   clients: ClientStore;
   tokens: TokenService;
   metrics: Metrics;
@@ -82,7 +85,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     protectedApp.addHook('preHandler', requireScope);
     const defaults = { mode: config.RETRIEVAL_MODE, topK: config.RETRIEVAL_TOP_K };
     await protectedApp.register(collectionRoutes, { repo, ml });
-    await protectedApp.register(searchRoutes, { repo, retriever, defaults, metrics });
+    await protectedApp.register(searchRoutes, { repo, retriever, defaults, metrics, condenser: deps.condenser });
     await protectedApp.register(queryRoutes, { repo, answerer, defaults, metrics });
   });
 

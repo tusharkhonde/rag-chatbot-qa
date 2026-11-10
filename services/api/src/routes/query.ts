@@ -4,7 +4,8 @@ import type { AnswerResult, Answerer } from '../generation/answerer.js';
 import type { Metrics } from '../observability/metrics.js';
 import { EmbeddingModelMismatchError } from '../retrieval/retriever.js';
 import type { RetrievalMode } from '../retrieval/types.js';
-import { searchBodySchema } from './search.js';
+import type { HistoryMessage } from '../generation/condense.js';
+import { historySchema, searchBodySchema } from './search.js';
 
 interface Deps {
   repo: Repo;
@@ -15,6 +16,7 @@ interface Deps {
 
 interface QueryBody {
   question: string;
+  history?: HistoryMessage[];
   topK?: number;
   mode?: RetrievalMode;
   stream?: boolean;
@@ -28,7 +30,8 @@ export const queryRoutes: FastifyPluginAsync<Deps> = async (app, { repo, answere
     log.info(
       {
         event: 'rag_query', collectionId, streamed, cached: result.cached, refused: result.refused,
-        mode: result.retrieval.mode, sources: result.sources.length, citations: result.citations.length,
+        mode: result.retrieval.mode, condensed: result.condensedQuestion !== null,
+        sources: result.sources.length, citations: result.citations.length,
         invalidCitations: result.invalidCitations, topVectorScore: result.retrieval.topVectorScore,
         usage: result.usage, timings: result.timings, model: result.model,
       },
@@ -52,6 +55,7 @@ export const queryRoutes: FastifyPluginAsync<Deps> = async (app, { repo, answere
           additionalProperties: false,
           properties: {
             question: searchBodySchema.query,
+            history: historySchema,
             topK: searchBodySchema.topK,
             mode: searchBodySchema.mode,
             stream: { type: 'boolean' },
@@ -67,6 +71,7 @@ export const queryRoutes: FastifyPluginAsync<Deps> = async (app, { repo, answere
         clientId: req.clientId,
         collection,
         question: req.body.question,
+        history: req.body.history,
         mode: req.body.mode ?? defaults.mode,
         topK: req.body.topK ?? defaults.topK,
       };
@@ -107,6 +112,7 @@ export const queryRoutes: FastifyPluginAsync<Deps> = async (app, { repo, answere
         for await (const event of answerer.stream(request, abort.signal)) {
           if (event.type === 'delta') send('delta', { text: event.text });
           else if (event.type === 'sources') send('sources', { sources: event.sources });
+          else if (event.type === 'condensed') send('condensed', { question: event.question });
           else {
             record(req.log, collection.id, event.result, true);
             send('done', event.result);

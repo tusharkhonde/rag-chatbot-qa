@@ -60,8 +60,8 @@ export function fakeApi() {
         listDocuments: async (id) => (rec('listDocuments')(id), { documents: [] }),
         upload: async (id, file) => (rec('upload')(id, file.filename), { status: 202, body: { documentId: 'd1', created: true, status: 'processing', chunkCount: 0 } }),
         deleteDocument: async (id, documentId) => void rec('deleteDocument')(id, documentId),
-        queryStream: async (id, question) => {
-          rec('queryStream')(id, question);
+        queryStream: async (id, question, history) => {
+          rec('queryStream')(id, question, history);
           return new Response(new ReadableStream({ start: (c) => (c.enqueue(new TextEncoder().encode(sse)), c.close()) }), {
             headers: { 'content-type': 'text/event-stream' },
           });

@@ -63,6 +63,7 @@ h3:first-child { margin-top: 0; }
 .doc-status.ready { color: var(--ok); }
 .doc-status.failed { color: var(--err); }
 .small { font-size: 0.85em; }
+.rewritten { color: var(--muted); font-size: 0.85em; font-style: italic; margin-bottom: 6px; }
 .muted { color: var(--muted); }
 .error { color: var(--err); margin: 8px 0; }
 .ok { color: var(--ok); margin: 8px 0; }

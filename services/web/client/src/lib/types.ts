@@ -13,5 +13,6 @@ export interface AnswerResult {
   sources: SourceInfo[];
   refused: boolean;
   cached: boolean;
+  condensedQuestion: string | null;
   timings: Record<string, number>;
 }

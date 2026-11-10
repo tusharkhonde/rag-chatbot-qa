@@ -21,6 +21,11 @@ const Env = z.object({
   // the system prompt, question and answer (Ollama is configured for 8192 in docker-compose.yml).
   MAX_CONTEXT_TOKENS: z.coerce.number().int().min(256).default(3000),
   ANSWER_CACHE_TTL_SECONDS: z.coerce.number().int().min(0).default(3600),
+  // Multi-turn chat: rewrite a follow-up plus recent history into a standalone question before
+  // retrieval. One extra short LLM call per follow-up; first questions never pay it.
+  CONDENSE_ENABLED: z.stringbool().default(true),
+  CHAT_HISTORY_MAX_MESSAGES: z.coerce.number().int().min(1).max(20).default(6),
+  CONDENSE_MAX_TOKENS: z.coerce.number().int().min(16).max(512).default(128),
   // Externally visible base URL: used as the token issuer and in OAuth / MCP discovery metadata.
   PUBLIC_BASE_URL: z.string().default('http://localhost:3000'),
   JWT_ISSUER: z.string().optional(), // defaults to PUBLIC_BASE_URL (RFC 8414: issuer is a URL)

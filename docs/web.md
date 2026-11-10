@@ -192,7 +192,14 @@ SPA ── POST /api/chat (cookie + CSRF) ──► BFF ── POST /collections
 - The UI shows each phase: "Searching the documents…", then "Found N sources, writing the answer…",
   then the streaming text. On a CPU-only model the first token can take a minute, and a visible
   status keeps the wait understandable.
-- Each question is answered on its own; earlier turns aren't sent as context (see limitations).
+- **Follow-up questions.** The browser holds the conversation and sends the last completed turns
+  (up to 6 messages) as `history` with each question
+  ([`client/src/lib/history.ts`](../services/web/client/src/lib/history.ts)). A turn whose answer
+  failed or was stopped is dropped together with its question. The API rewrites the follow-up into
+  a standalone question (query condensation, see how-it-works §5.21) and streams it back first as a
+  `condensed` event, which the UI shows as *Searched for: "…"*. **New chat** and switching
+  collection start a fresh conversation. The BFF validates the history's shape (roles, sizes) but
+  stores nothing: conversations live only in the tab.
 
 ## Rendering untrusted model output
 
@@ -252,10 +259,12 @@ services/web/
   - disabling a user kills their sessions
   - admins can't disable themselves
   - SSE passthrough
+  - chat history forwarded to the API, and rejected when malformed (e.g. a `system` role)
   - the CSP header
 - **Units:** per-role token scopes and caching, hashed session keys, absolute expiry, password policy.
-- **Client:** the SSE parser (split chunks, CRLF, comments, multi-line data, split UTF-8) and the renderer
-  (citations, code, lists, **HTML stays inert**).
+- **Client:** the SSE parser (split chunks, CRLF, comments, multi-line data, split UTF-8), the renderer
+  (citations, code, lists, **HTML stays inert**) and the chat history builder (failed and in-flight
+  turns excluded, most recent messages kept).
 - **Integration** (Postgres): argon2id storage, case-insensitive login, duplicate emails, disabled accounts.
 - **Manual end to end:** headless Chrome driven through the DevTools protocol, signed in with a real
   session cookie, clicking through chat and admin. That is how the two bugs below were found.
@@ -273,10 +282,8 @@ services/web/
 
 ## Limitations and next steps
 
-- **Single-turn chat.** Follow-ups like "and for Nimbus?" aren't resolved against earlier turns.
-  The standard fix is **query condensation**: ask the LLM to rewrite the follow-up plus recent
-  history into a standalone question, then retrieve with that. It costs one more LLM call per
-  turn, which is slow on CPU.
+- **Follow-ups cost an extra LLM call** (the condensation), which adds 10–60 s per follow-up on
+  CPU. Conversations aren't saved: reloading the page starts over.
 - **No password reset or self-service password change** (admins create accounts with an initial
   password); no MFA. Next steps: change-password, then TOTP or WebAuthn passkeys.
 - **Ingestion progress is polled** (every 2 s while a document is processing), not pushed. A

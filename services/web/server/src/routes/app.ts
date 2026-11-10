@@ -1,5 +1,5 @@
 import type { FastifyPluginAsync } from 'fastify';
-import type { ApiClient } from '../apiClient.js';
+import type { ApiClient, ChatTurn } from '../apiClient.js';
 import type { sessionHooks } from '../auth.js';
 import type { SessionStore } from '../sessions.js';
 import { DuplicateEmailError, WeakPasswordError, type Role, type UserStore } from '../users.js';
@@ -66,7 +66,7 @@ export const appRoutes: FastifyPluginAsync<Deps> = async (app, { api, users, ses
 
   // ---------------------------------------------------------------- chat (streamed)
 
-  app.post<{ Body: { collectionId: string; question: string } }>(
+  app.post<{ Body: { collectionId: string; question: string; history?: ChatTurn[] } }>(
     '/chat',
     {
       schema: {
@@ -74,13 +74,32 @@ export const appRoutes: FastifyPluginAsync<Deps> = async (app, { api, users, ses
           type: 'object',
           required: ['collectionId', 'question'],
           additionalProperties: false,
-          properties: { collectionId: { type: 'string', format: 'uuid' }, question: { type: 'string', minLength: 1, maxLength: 1000 } },
+          properties: {
+            collectionId: { type: 'string', format: 'uuid' },
+            question: { type: 'string', minLength: 1, maxLength: 1000 },
+            // Earlier turns of this chat, for follow-up questions. The browser holds the
+            // conversation; the BFF validates its shape and the API bounds what it uses.
+            history: {
+              type: 'array',
+              maxItems: 12,
+              items: {
+                type: 'object',
+                required: ['role', 'content'],
+                additionalProperties: false,
+                properties: {
+                  role: { type: 'string', enum: ['user', 'assistant'] },
+                  content: { type: 'string', minLength: 1, maxLength: 4000 },
+                },
+              },
+            },
+          },
         },
       },
     },
     async (req, reply) => {
       const abort = new AbortController();
-      const upstream = await rag(req.session!.role).queryStream(req.body.collectionId, req.body.question, abort.signal);
+      const { collectionId, question, history = [] } = req.body;
+      const upstream = await rag(req.session!.role).queryStream(collectionId, question, history, abort.signal);
       if (!upstream.ok || !upstream.body) {
         const body = (await upstream.json().catch(() => null)) as { error?: string } | null;
         return reply.code(upstream.status >= 500 ? 502 : upstream.status).send({ error: body?.error ?? 'Chat request failed' });
