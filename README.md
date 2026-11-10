@@ -245,33 +245,62 @@ Each has a short decision record in [`docs/adr/`](docs/adr/) with the alternativ
 
 ## Evaluation
 
-`scripts/eval.sh` runs the harness in a container on the compose network against
-[`eval/dataset.jsonl`](eval/dataset.jsonl): 20 answerable questions (each with the expected
-source document and key phrases) and 5 unanswerable ones. A retrieved chunk counts as relevant
-if it comes from the expected document **and** contains an expected phrase.
+`scripts/eval.sh` runs the harness in a container on the compose network against two datasets
+that share gold answers:
+- [`eval/dataset.jsonl`](eval/dataset.jsonl): 20 answerable questions (each with the expected
+  source document and key phrases) and 5 unanswerable ones, written from the documents.
+- [`eval/dataset-paraphrased.jsonl`](eval/dataset-paraphrased.jsonl): the same 25 questions
+  reworded the way a user who hasn't read the documents would ask them ("event bus" for
+  Nimbus Queue, "satellite contact" for pass).
+
+A retrieved chunk counts as relevant if it comes from the expected document **and** contains an
+expected phrase. [`eval/conversations.jsonl`](eval/conversations.jsonl) adds 10 follow-up
+questions that only make sense after an earlier turn.
 
 ```bash
-scripts/eval.sh                       # retrieval: all modes, all questions (~10 s)
-scripts/eval.sh --generate --limit 5  # plus answer quality on 5 + 5 questions (slow on CPU)
+scripts/eval.sh                       # retrieval: both datasets, all modes (~15 s)
+scripts/eval.sh --conversations       # plus follow-ups with vs without chat history (~2 min on CPU)
+scripts/eval.sh --generate --limit 5  # plus answer quality on 5 + 5 questions per dataset (slow on CPU)
 ```
 
-Retrieval on the sample corpus (k = 5):
+Retrieval on the sample corpus (k = 5, hit@5 / MRR). *Vocabulary overlap* is the share of a
+question's content words that appear in its source document:
 
-| mode | precision@5 | hit@5 (= recall@5) | MRR |
-|---|---|---|---|
-| hybrid | 0.200 | 1.000 | 0.942 |
-| vector | 0.200 | 1.000 | 0.871 |
-| keyword | 0.200 | 1.000 | 0.950 |
+| dataset | vocabulary overlap | hybrid | vector | keyword |
+|---|---|---|---|---|
+| written from the documents | 0.77 | 1.00 / 0.94 | 1.00 / 0.87 | 1.00 / 0.95 |
+| paraphrased | 0.34 | 0.85 / 0.61 | **0.90 / 0.70** | 0.65 / 0.51 |
 
 Reading the numbers:
-- **precision@5 = 0.2** is the ceiling here: each question has one answer-bearing chunk. That's
-  why it's reported together with hit@k and MRR.
-- **Keyword ≈ hybrid > vector on MRR.** The questions were written from the documents and share
-  their vocabulary, which favours keyword search. Hybrid keeps its advantage on paraphrased
-  questions ("message broker" → Nimbus Queue).
-- **Retrieval confidence overlaps:** unanswerable questions reach a top cosine similarity of 0.70,
-  while some answerable ones score 0.56. No similarity threshold separates them, so the refusal
-  decision is left to the grounded prompt rather than a score cutoff.
+- **The original set flatters keyword search.** Its questions reuse the documents' words, so
+  every mode finds every answer and keyword search ranks best.
+- **On paraphrases, keyword search collapses** (hit@5 1.00 → 0.65) and vector search degrades
+  least, as expected: embeddings match meaning, not words.
+- **Hybrid lands *below* vector-only on paraphrases.** Reciprocal Rank Fusion rewards chunks that
+  both retrievers return. A chunk ranked ~10th by both scores 2/70 ≈ 0.029, more than one ranked
+  1st by vector search alone (1/61 ≈ 0.016). When keyword results are noise, that agreement bonus
+  goes to the wrong chunks. In `deploy-window-para`, vector search ranked the answer 1st and
+  hybrid dropped it from the top 5. Weighted fusion, fewer keyword candidates, or a reranker
+  are the fixes to evaluate next. This is the kind of finding a dataset written from the
+  documents can't produce.
+- **precision@5 ≤ 0.2** by construction (one answer-bearing chunk per question), so it's reported
+  but not used to compare.
+- **Retrieval confidence overlaps:** unanswerable questions reach a top cosine similarity of 0.70
+  (0.62 paraphrased), while some answerable ones score 0.56. No similarity threshold separates them,
+  so the refusal decision is left to the grounded prompt rather than a score cutoff.
+
+Follow-up questions (hybrid, k = 5), each retrieved as typed and then with the earlier turn as
+`history` (query condensation):
+
+| follow-up retrieval | hit@5 | MRR |
+|---|---|---|
+| as typed ("And outside of those windows?") | 0.90 | 0.63 |
+| condensed with history | 0.90 | **0.85** |
+
+Condensation rewrote 7 of 10 follow-ups and moved the answer to rank 1 in four of them, at a
+median 6.5 s per rewrite on CPU. Hit@5 is unchanged because several bare follow-ups still share a
+distinctive word with the answer ("SEV2"). One follow-up ("anything I have to write up
+afterwards?") is missed either way: the model judged it standalone and left it unchanged.
 
 Generation, `--generate --limit 3` (3 answerable + 3 unanswerable questions, qwen2.5:7b on CPU):
 
@@ -314,8 +343,8 @@ docker run --rm --network rag_default -e DATABASE_URL=postgresql://rag:rag@postg
 # web app: BFF + client unit tests, then Postgres integration tests
 cd services/web && npm test && npm run test:integration
 
-# evaluation metric functions
-docker run --rm -v "$PWD/eval":/eval -w /eval python:3.12-slim python -m unittest
+# evaluation metrics and dataset checks (expected phrases exist, paraphrases share less vocabulary)
+docker run --rm -v "$PWD/eval":/eval -v "$PWD/samples":/samples:ro -w /eval python:3.12-slim python -m unittest
 ```
 
 Coverage highlights: chunk boundaries/overlap/limits, parsers (heading paths, PDF pages), the
@@ -350,7 +379,7 @@ db/migrations/        001 schema + HNSW · 002 weighted full-text · 003 row-lev
 services/api/src/     auth/ cache/ db/ generation/ mcp/ ml/ observability/ retrieval/ routes/ cli/
 services/web/         server/ (Fastify BFF: users, sessions, CSRF, roles, API client) · client/ (React SPA)
 services/ml/app/      parsers · chunker · embedder · pipeline (accept/process) · store (queue SQL) · worker · main (FastAPI)
-eval/                 dataset.jsonl · run_eval.py · metrics.py · reports/
+eval/                 dataset.jsonl · dataset-paraphrased.jsonl · conversations.jsonl · run_eval.py · metrics.py · reports/
 samples/              docs/ (fictional handbook, runbook, FAQ) · queries.md
 scripts/              demo.sh · eval.sh
 docs/                how-it-works.md · web.md · mcp.md · images/ · adr/ (architecture decision records)
@@ -363,5 +392,6 @@ docs/                how-it-works.md · web.md · mcp.md · images/ · adr/ (arc
 - **Reranking:** a cross-encoder second stage where model sources allow it.
 - **Key management:** signing key from a KMS or secret manager with scheduled rotation (the JWKS already supports several keys by `kid`).
 - **Tracing:** OpenTelemetry spans across api → ml → Postgres → LLM instead of per-stage timings only.
+- **Fusion tuning:** the paraphrased evaluation shows hybrid ranking below vector-only; try weighted RRF or a reranker and keep the change only if both datasets improve.
 - **Online evaluation:** sample production answers for LLM-judge scoring; track refusal and citation rates over time.
 - **Scale:** partition chunks by tenant or move to a dedicated vector store past tens of millions of vectors.

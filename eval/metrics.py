@@ -18,6 +18,28 @@ def is_relevant(chunk: dict, item: dict) -> bool:
     return any(normalize(p) in content for p in item["expected_phrases"])
 
 
+# Small stopword list: enough to keep "how/the/is" from counting as shared vocabulary.
+_STOPWORDS = set(
+    "a an and are as at be by can do does for from has have how i if in is it its of on or so that the "
+    "their then there they this to was we what when where which who why will with you your our us me my "
+    "should must may any all into out up down one".split()
+)
+
+
+def content_words(text: str) -> set[str]:
+    """Lower-cased words minus stopwords, with a crude plural strip ("deploys" ~ "deploy")."""
+    words = re.findall(r"[a-z0-9][a-z0-9._-]*", text.lower())
+    return {w[:-1] if len(w) > 3 and w.endswith("s") else w for w in words if w not in _STOPWORDS}
+
+
+def vocabulary_overlap(question: str, document: str) -> float:
+    """Share of the question's content words that also appear in the document. High overlap makes
+    keyword search look better than it would on real users' questions; the paraphrased set
+    is written to keep this low."""
+    q = content_words(question)
+    return len(q & content_words(document)) / len(q) if q else 0.0
+
+
 def precision_at_k(relevant: list[bool], k: int) -> float:
     """Share of the top k that is relevant. Capped by how many relevant chunks exist: with one
     answer-bearing chunk and k=5 the best possible score is 0.2, which is why it's reported

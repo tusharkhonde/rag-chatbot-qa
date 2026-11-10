@@ -589,12 +589,36 @@ expected document *and* contains an expected phrase:
 - **MRR** (mean reciprocal rank): average of 1/rank of the first relevant chunk. Rewards
   putting the answer first.
 
-Results on the sample corpus: hit@5 = 1.0 for every mode; MRR 0.942 hybrid, 0.871 vector,
-0.950 keyword. The questions were written from the documents and reuse their vocabulary, which
-favours keyword search; a real evaluation set should include paraphrased questions from real users.
+**Two datasets, same gold answers.** `dataset.jsonl` was written from the documents, so its
+questions reuse their words (77% of a question's content words appear in its source document).
+Real users haven't read the documents. `dataset-paraphrased.jsonl` rewords every question
+("event bus" for Nimbus Queue, "satellite contact" for pass), bringing that overlap down to 34%.
+`eval/test_datasets.py` checks that every expected phrase still appears verbatim in its document
+and that the paraphrases really share less vocabulary.
+
+| dataset (hit@5 / MRR) | hybrid | vector | keyword |
+|---|---|---|---|
+| written from the documents | 1.00 / 0.94 | 1.00 / 0.87 | 1.00 / 0.95 |
+| paraphrased | 0.85 / 0.61 | 0.90 / 0.70 | 0.65 / 0.51 |
+
+The first row alone says "keyword search is best and everything works". The second row says
+keyword search fails on a third of real-sounding questions, and that **hybrid now ranks below
+vector-only**. The reason is RRF itself (section 5.5): it rewards agreement between the two lists.
+A chunk that both retrievers rank around 10th scores 2/70 ≈ 0.029, beating a chunk that vector
+search ranks 1st and keyword search misses (1/61 ≈ 0.016). When one retriever returns noise, its
+noise still "agrees" with the other list often enough to push the true answer down. In
+`deploy-window-para` vector search had the answer at rank 1 and the fused top 5 didn't. Fixes to
+try, keeping only one that improves *both* datasets: weight the vector list higher, take fewer
+keyword candidates, or rerank the fused list.
+
+**Conversations** (`eval/conversations.jsonl`, `--conversations`): 10 follow-ups ("And outside
+of those windows?") retrieved as typed, then with the earlier turn as history (section 5.21).
+MRR rises from 0.63 to 0.85 at the same hit@5 (0.90). Seven of ten were rewritten, four moved to
+rank 1, and the rewrite costs a median 6.5 s on CPU.
 
 **Calibration finding.** Top cosine similarity for answerable questions ranged 0.557–0.859;
-for unanswerable ones 0.599–0.701. The ranges **overlap**, so no similarity threshold can decide
+for unanswerable ones 0.599–0.701 (0.521–0.623 on the paraphrased set, against 0.620 for the
+weakest answerable paraphrase). The ranges **overlap**, so no similarity threshold can decide
 "the documents don't contain this". That's why refusal is left to the grounded prompt, and why
 the hit-rate metric is a health signal, not a gate.
 
@@ -747,7 +771,8 @@ in effect: it either commits everything once, or finds the job gone.
 Retrieval sees one string. In a conversation, the follow-up "and what about the raw telemetry
 topic?" has no subject: the subject ("how long Nimbus Queue keeps messages") was in the previous
 turn. Searched as-is on the sample corpus, it pulls ground-station FAQ chunks that mention
-telemetry instead of the Nimbus Queue runbook.
+telemetry instead of the Nimbus Queue runbook. On the evaluation's 10 follow-ups, condensation
+raises MRR from 0.63 to 0.85 (section 5.15).
 
 **The fix: rewrite, then retrieve** (`services/api/src/generation/condense.ts`). When a request
 carries `history`, one short LLM call rewrites the latest message into a standalone question:
@@ -820,7 +845,7 @@ These make good stories because each one was silent: nothing crashed.
 | Keys | Generated, stored in a volume | KMS/secret manager, scheduled rotation, several keys in the JWKS |
 | Revocation | Expiry (15 min) | `jti` denylist in Redis if instant revocation is required |
 | Tracing | Per-stage timings | OpenTelemetry spans across api → ml → Postgres → LLM |
-| Evaluation | Offline dataset | Plus online sampling, user feedback, regression gates in CI |
+| Evaluation | Offline datasets (original, paraphrased, conversations) | Plus real user questions, online sampling, user feedback, regression gates in CI |
 
 ## 8. Questions this design should be able to answer
 
@@ -910,9 +935,14 @@ login), and a per-session token the page sends in a header, which a cross-site a
 **If the frontend hides the Admin tab, is that security?** No, that's UX. The server checks the
 role on every admin route, and chat users' API tokens can't write at all.
 
-**What's the weakest part of this system?** Generation speed on CPU, and a small evaluation set
-written from the documents themselves (it favours keyword search). Next steps: a paraphrased
-evaluation set from real questions, and reranking.
+**What's the weakest part of this system?** Generation speed on CPU, and fusion: on paraphrased
+questions hybrid retrieval ranks below vector search alone, because RRF's agreement bonus goes to
+chunks the noisy keyword list happens to share. Next steps: weighted fusion or a reranker,
+validated on both evaluation sets, and real user questions in the evaluation.
+
+**Why evaluate on paraphrased questions?** Questions written while reading the documents share
+their vocabulary, which makes keyword search look perfect (hit@5 = 1.0). Rewording them like a
+user would drops keyword search to 0.65 and exposed a fusion weakness the original set hid.
 
 **Why a job table in Postgres rather than a message broker?** The job is created in the same
 transaction as its document, so there's no dual-write gap. `FOR UPDATE SKIP LOCKED` gives

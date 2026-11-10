@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Run the offline evaluation inside the compose network (no local Python needed).
 #   scripts/eval.sh                      # retrieval metrics for hybrid, vector and keyword modes
-#   scripts/eval.sh --generate --limit 5 # plus answer quality for 5 answerable + 5 unanswerable questions
+#   scripts/eval.sh --generate --limit 5 # plus answer quality for 5 answerable + 5 unanswerable questions per dataset
+#   scripts/eval.sh --conversations      # plus follow-up questions with vs without chat history (LLM calls)
+#   scripts/eval.sh --dataset dataset.jsonl  # one dataset only (default: original + paraphrased)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
