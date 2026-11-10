@@ -10,6 +10,8 @@ export interface Principal {
   clientId: string; // internal tenant id (clients.id): what every data access is scoped by
   publicClientId: string; // the client_id the caller authenticated with
   scopes: Scope[];
+  /** Set when the token was issued on a person's behalf (authorization code flow). */
+  userId?: string;
 }
 
 export class InvalidTokenError extends Error {}
@@ -35,7 +37,10 @@ export function createTokenService(
   return {
     async issue(principal, issueOpts = {}) {
       const scope = principal.scopes.join(' ');
-      const token = await new SignJWT({ scope, client_id: principal.publicClientId })
+      // `sub` stays the tenant: every data access is scoped by it, for machine and user tokens alike.
+      // `uid` names the person when a user delegated access (authorization code flow).
+      const claims = { scope, client_id: principal.publicClientId, ...(principal.userId ? { uid: principal.userId } : {}) };
+      const token = await new SignJWT(claims)
         .setProtectedHeader({ alg: 'RS256', kid: key.kid, typ: 'at+jwt' }) // RFC 9068 access-token type
         .setIssuer(opts.issuer)
         .setAudience(issueOpts.audience ?? opts.audience)
@@ -62,7 +67,12 @@ export function createTokenService(
         const scopes = String(payload.scope ?? '')
           .split(' ')
           .filter((s): s is Scope => (SCOPES as readonly string[]).includes(s));
-        return { clientId: payload.sub!, publicClientId: String(payload.client_id ?? ''), scopes };
+        return {
+          clientId: payload.sub!,
+          publicClientId: String(payload.client_id ?? ''),
+          scopes,
+          ...(typeof payload.uid === 'string' ? { userId: payload.uid } : {}),
+        };
       } catch (err) {
         throw new InvalidTokenError((err as Error).message);
       }

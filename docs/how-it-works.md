@@ -31,6 +31,7 @@ headings as a reference.
   - [5.19 The web app: backend-for-frontend, sessions and CSRF](#519-the-web-app-backend-for-frontend-sessions-and-csrf)
   - [5.20 Background jobs: a queue in Postgres](#520-background-jobs-a-queue-in-postgres)
   - [5.21 Multi-turn chat: query condensation](#521-multi-turn-chat-query-condensation)
+  - [5.22 Delegated access: authorization code + PKCE and refresh tokens](#522-delegated-access-authorization-code--pkce-and-refresh-tokens)
 - [6. Bugs found while building it](#6-bugs-found-while-building-it)
 - [7. Tradeoffs and what changes at scale](#7-tradeoffs-and-what-changes-at-scale)
 - [8. Questions this design should be able to answer](#8-questions-this-design-should-be-able-to-answer)
@@ -502,6 +503,10 @@ statelessness for instant revocation.
 **Rate limiting.** `/oauth/token` is the one endpoint that checks secrets, so it's limited to
 20 requests/minute per IP to slow down guessing.
 
+**Machines vs people.** Everything above is about a *service* acting as itself. When an
+application should act for a *person* (a CLI, a desktop app, a remote MCP host), the
+authorization code flow with PKCE takes over: section 5.22.
+
 ### 5.13 Multi-tenancy and row-level security
 
 Two independent layers:
@@ -811,6 +816,71 @@ Details that matter:
 The web app keeps the conversation in the browser tab and sends the last completed turns with
 each question. The API is stateless about conversations, so any replica can serve any turn.
 
+### 5.22 Delegated access: authorization code + PKCE and refresh tokens
+
+Client credentials (5.12) answer "which service is calling?". When an application acts for a
+person, the question becomes "which person allowed this application to do what?". The
+application must never see the person's password, and it often can't keep a secret either: a CLI
+or desktop app ships to every user, so anything inside it is public. ADR:
+[0010](adr/0010-authorization-code-pkce.md).
+
+**The flow** (`services/api/src/routes/authorize.ts`, try it with `scripts/pkce-demo.mjs`):
+
+```
+app                         browser                          API (authorization server)
+ │ make verifier (random), challenge = base64url(SHA-256(verifier)), state (random)
+ │── open /oauth/authorize?client_id&redirect_uri&code_challenge&state ──►│ check client + exact redirect URI
+ │                            │◄──── sign-in page ──────────────────────────│
+ │                            │── email + password ────────────────────────►│ argon2id, role, tenant
+ │                            │◄──── consent: "Docs CLI wants to: …" ───────│
+ │                            │── Allow ───────────────────────────────────►│ one-time code (60 s)
+ │◄── 303 to http://127.0.0.1:8765/callback?code&state&iss ───────────────────│
+ │ check state and iss
+ │── POST /oauth/token  code + code_verifier + client_id ───────────────────►│ SHA-256(verifier) == challenge?
+ │◄── access token (15 min JWT: sub = tenant, uid = person) + refresh token ──│
+```
+
+Concepts in it:
+- **Public vs confidential clients.** A confidential client (a server) can keep a secret; a public
+  one (CLI, desktop, single-page app) can't. Public clients authenticate with `client_id` only.
+  What protects them is PKCE, plus binding the code to an exact redirect URI.
+- **PKCE** (RFC 7636). The code travels through the browser, where it can leak: history, logs,
+  or another app registered for the same redirect. PKCE makes a stolen code worthless. The
+  client commits to a secret (sends its hash) before the code exists and reveals it only to the
+  token endpoint. Only `S256`: with `plain`, anyone who saw the request has the secret.
+- **`state`** protects the *client* from CSRF: a callback whose state the client didn't create
+  is rejected. **`iss`** (RFC 9207) tells the client which server answered, which defends against
+  mix-ups when a client talks to several.
+- **Redirect URIs are matched exactly.** Prefix matching has leaked codes in real systems. Errors
+  about the client or redirect URI are shown on our own page, never redirected, or the endpoint
+  becomes an open redirector. Native apps listen on a loopback IP with an OS-chosen port
+  (RFC 8252), so for `127.0.0.1` only the port may differ.
+- **Codes:** 256-bit, single use (Redis `GETDEL`, so two concurrent redemptions can't both win),
+  60 seconds, stored by hash, bound to client, redirect URI, challenge, user, scopes and resource.
+- **Consent pages are a web app** and get the same defences as one (5.19). The forms carry a
+  CSRF token and must come from our own origin. Clickjacking is blocked with
+  `frame-ancestors 'none'`. The CSP is `default-src 'none'` (there's no JavaScript), and
+  `form-action` names the client's redirect origin, because browsers apply it to the redirect
+  that follows a form post.
+- **What the token can do = requested ∩ client's ∩ the person's role.** A chat user can't
+  delegate upload rights they don't have.
+- **`sub` stays the tenant** (the person's organization, `web_users.tenant_id`) and `uid` names
+  the person. Every route, RLS policy and cache key is keyed by tenant, so nothing downstream
+  changed; logs gain the user id.
+
+**Refresh tokens and rotation.** Access tokens stay short (15 minutes) and stateless. A refresh
+token lets the app get new ones without sending the person through the browser again:
+- Opaque and random, stored only as SHA-256 (a 256-bit random value needs no slow hash).
+- **Rotation:** each use returns a new refresh token and marks the old one used. The family keeps
+  one absolute expiry (30 days), so rotation never extends a sign-in.
+- **Reuse detection:** if a used token comes back, two parties hold copies, and the server can't
+  tell which is the attacker. It revokes the whole family, so both have to sign in again. A row
+  lock (`FOR UPDATE`) makes two simultaneous refreshes with one token resolve to one winner.
+- The person is **re-checked on every refresh**: disabling an account ends delegated access
+  within one access-token lifetime.
+- **Revocation** (`POST /oauth/revoke`, RFC 7009) is how an app signs out. It always answers 200,
+  so it can't be used to probe which tokens exist.
+
 ## 6. Bugs found while building it
 
 These make good stories because each one was silent: nothing crashed.
@@ -832,6 +902,12 @@ These make good stories because each one was silent: nothing crashed.
 6. **Model supply chain.** The network blocks Hugging Face, so the planned sentence-transformers
    models couldn't be downloaded. The embedding layer already sat behind a provider interface,
    so switching to Ollama-served models was a configuration change.
+7. **`Referrer-Policy: no-referrer` broke the sign-in form.** The authorization pages set it so
+   the URL (state, challenge) never leaks. But under that policy Chrome sends `Origin: null` on the
+   page's own form posts, so the same-origin check rejected every real sign-in. Unit tests passed,
+   because they set the Origin header by hand; only a run in a real browser showed it. Fix:
+   `same-origin` (still nothing leaks to other sites), plus accepting the browser-set
+   `Sec-Fetch-Site: same-origin` when Origin is `null`.
 
 ## 7. Tradeoffs and what changes at scale
 
@@ -843,7 +919,8 @@ These make good stories because each one was silent: nothing crashed.
 | Reranking | RRF only | Cross-encoder or LLM reranker on the top 20–50 |
 | Token counting | Pessimistic estimate | The model's real tokenizer, if it can run in-process |
 | Keys | Generated, stored in a volume | KMS/secret manager, scheduled rotation, several keys in the JWKS |
-| Revocation | Expiry (15 min) | `jti` denylist in Redis if instant revocation is required |
+| Revocation | Expiry (15 min); refresh-token families revocable | `jti` denylist in Redis if instant access-token revocation is required |
+| Authorization server | Built in: client credentials + authorization code/PKCE, operator-registered clients | Dynamic client registration, SSO session, MFA, or an external identity provider (Keycloak, Auth0, Okta) |
 | Tracing | Per-stage timings | OpenTelemetry spans across api → ml → Postgres → LLM |
 | Evaluation | Offline datasets (original, paraphrased, conversations) | Plus real user questions, online sampling, user feedback, regression gates in CI |
 
@@ -881,6 +958,18 @@ refusal accuracy), and latency percentiles.
 
 **Why RS256 and not HS256?** With HS256, every verifier holds the key that can mint tokens.
 RS256 separates signing (private key, only the API) from verifying (public JWKS, anyone).
+
+**Why PKCE, and why only S256?** The code passes through the browser and can leak; PKCE ties it to
+a secret only the requesting app knows (it sent only the hash). With `plain` the challenge *is*
+the secret, so anyone who saw the authorization request could redeem the code.
+
+**Public vs confidential client?** A confidential client runs where a secret stays secret (a
+server). A public client (CLI, desktop, single-page app) ships to users, so it can't hold one;
+it authenticates with PKCE and exact redirect URIs instead.
+
+**Why rotate refresh tokens?** A stolen refresh token is long-lived access. With rotation each one
+works once, so a copy used by an attacker collides with the real app's next use: the server sees
+the reuse and revokes the family.
 
 **How would you revoke a token?** Short expiry bounds exposure. For instant revocation, a denylist
 of `jti` values checked on each request (Redis), or switch to opaque tokens with introspection,

@@ -26,6 +26,9 @@ Redis · Ollama (`qwen2.5:7b` for answers, `nomic-embed-text` for embeddings) ·
   location each), carry a context header, and can never be silently truncated by the model.
 - **OAuth2 client credentials → RS256 JWTs** with JWKS, scopes, argon2id secret hashing, rate
   limiting, and **Postgres row-level security** as a second tenancy layer.
+- **Authorization code + PKCE for people:** an application acts for a signed-in web-app user
+  (sign-in and consent pages, S256 only, exact redirect URIs, single-use codes), limited by that
+  user's role, with rotating refresh tokens and reuse detection.
 - **Caching that invalidates itself:** query embeddings and answers in Redis, keyed on tenant,
   collection version, models and prompt version.
 - **Streaming:** answers stream over Server-Sent Events; client disconnects abort generation.
@@ -100,7 +103,9 @@ curl -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
 
 | Endpoint | Scope | Purpose |
 |---|---|---|
-| `POST /oauth/token` | – | Client-credentials grant → 15-min RS256 access token |
+| `POST /oauth/token` | – | `client_credentials`, `authorization_code` (+ PKCE) or `refresh_token` → 15-min RS256 access token |
+| `GET /oauth/authorize` | – | Authorization code + PKCE: sign-in and consent pages for web-app users |
+| `POST /oauth/revoke` | – | Revoke a refresh token (and its rotation family), RFC 7009 |
 | `GET /.well-known/jwks.json` | – | Public signing keys |
 | `GET /.well-known/oauth-authorization-server` · `/.well-known/oauth-protected-resource/mcp` | – | OAuth discovery metadata (RFC 8414 / RFC 9728) |
 | `POST /collections` · `GET /collections` | `documents:write` · `query` | Manage collections |
@@ -168,6 +173,21 @@ Timings are in milliseconds: retrieval takes ~60 ms, generation on CPU takes the
 5. Embed the query (Redis-cached), then run **vector** and **keyword** search concurrently, 20 candidates each; fuse with RRF; keep the top 5.
 6. No chunks → refuse without calling the LLM. Otherwise build the prompt: numbered `<source>` blocks within a token budget, grounding and refusal rules, document text treated as untrusted.
 7. Stream tokens from the LLM (SSE: [`condensed`] → `sources` → `delta`… → `done`); parse `[n]` citations; flag invalid ones; cache the result; record metrics and one structured log line.
+
+### Acting for a person: authorization code + PKCE
+
+```bash
+# Register an application people sign in to (public client: no secret, loopback redirect)
+docker compose exec api node dist/cli/create-client.js --name "Docs CLI" --public \
+  --redirect-uri http://127.0.0.1:8765/callback
+
+# Sign in through the browser, then watch: code exchange, an API call as you, refresh-token
+# rotation, and a replayed refresh token revoking the sign-in
+node scripts/pkce-demo.mjs --client-id <client_id>
+```
+
+Tokens issued this way act on the person's organization (the web app's tenant) with their role's
+scopes. Details: [ADR 0010](docs/adr/0010-authorization-code-pkce.md) and how-it-works §5.22.
 
 ## Web app
 
@@ -240,6 +260,7 @@ Each has a short decision record in [`docs/adr/`](docs/adr/) with the alternativ
 | [Auth & tenancy](docs/adr/0005-auth-and-tenancy.md) | Client credentials, RS256 JWT, scopes, RLS | Stateless verification, vs. revocation only by expiry |
 | [Caching](docs/adr/0006-caching.md) | Versioned keys in Redis | Self-invalidating, tenant-safe, vs. no semantic (similar-question) hits |
 | [Web app auth](docs/adr/0008-web-bff.md) | Backend-for-frontend with server-side sessions | No tokens in the browser and instant revocation, vs. a stateful session store |
+| [Delegated access](docs/adr/0010-authorization-code-pkce.md) | Authorization code + PKCE, rotating refresh tokens, `sub` = tenant + `uid` | Apps act for a person within their role, vs. a larger auth surface (sign-in, consent, token state) |
 | [MCP](docs/adr/0007-mcp-server.md) | One server definition, stdio + stateless Streamable HTTP, audience-bound tokens | Reuses auth/RLS in-process and scales without sessions, vs. no server-initiated messages |
 | [Ingestion](docs/adr/0009-async-ingestion.md) | 202 + background workers on a Postgres job queue | Atomic enqueue, no new infrastructure, vs. a broker's throughput and push delivery |
 
@@ -352,7 +373,9 @@ ingestion queue (SKIP LOCKED claims, lease reclaim and fencing, retry backoff, c
 RRF, SQL retrieval on seeded vectors (including cross-collection isolation and the
 double-stemming regression), prompt construction and injection escaping, citation parsing,
 cache keys (tenant, version), SSE, token forgery (expired, wrong audience/issuer/key,
-`alg: none`, HS256 key confusion, tampering), OAuth errors and rate limiting, RLS, and MCP
+`alg: none`, HS256 key confusion, tampering), OAuth errors and rate limiting, the authorization
+code flow (RFC 7636 PKCE vector, redirect-URI matching, single-use codes, CSRF and cross-site
+posts, refresh rotation, reuse detection and concurrent refreshes), RLS, and MCP
 (a real MCP client over the SDK's in-memory transport, `/mcp` JSON-RPC, audience binding,
 discovery metadata, the stdio backend's token refresh).
 
@@ -371,17 +394,18 @@ Every setting has a default; see [`.env.example`](.env.example).
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` | `admin@example.com` / generated | Initial web admin, created only when no users exist |
 | `WEB_PUBLIC_ORIGIN` / `COOKIE_SECURE` | `http://localhost:8080` / `false` | The web app's origin (CSRF Origin check); set Secure cookies behind HTTPS |
 | `PUBLIC_BASE_URL` | `http://localhost:3000` | Token issuer and OAuth/MCP discovery URLs; the MCP resource is `<base>/mcp` |
+| `REFRESH_TOKEN_TTL_SECONDS` | `2592000` (30 days) | Absolute lifetime of a person's sign-in in an application (authorization code flow) |
 
 ## Project layout
 
 ```
-db/migrations/        001 schema + HNSW · 002 weighted full-text · 003 row-level security · 004 web users · 005 ingest jobs
+db/migrations/        001 schema + HNSW · 002 weighted full-text · 003 row-level security · 004 web users · 005 ingest jobs · 006 auth code + refresh tokens
 services/api/src/     auth/ cache/ db/ generation/ mcp/ ml/ observability/ retrieval/ routes/ cli/
 services/web/         server/ (Fastify BFF: users, sessions, CSRF, roles, API client) · client/ (React SPA)
 services/ml/app/      parsers · chunker · embedder · pipeline (accept/process) · store (queue SQL) · worker · main (FastAPI)
 eval/                 dataset.jsonl · dataset-paraphrased.jsonl · conversations.jsonl · run_eval.py · metrics.py · reports/
 samples/              docs/ (fictional handbook, runbook, FAQ) · queries.md
-scripts/              demo.sh · eval.sh
+scripts/              demo.sh · eval.sh · pkce-demo.mjs
 docs/                how-it-works.md · web.md · mcp.md · images/ · adr/ (architecture decision records)
 ```
 
@@ -391,6 +415,7 @@ docs/                how-it-works.md · web.md · mcp.md · images/ · adr/ (arc
 - **GPU inference** or a hosted LLM; keep Ollama for local development.
 - **Reranking:** a cross-encoder second stage where model sources allow it.
 - **Key management:** signing key from a KMS or secret manager with scheduled rotation (the JWKS already supports several keys by `kid`).
+- **Dynamic client registration** (RFC 7591) with a registration policy, so applications can register themselves for the authorization code flow.
 - **Tracing:** OpenTelemetry spans across api → ml → Postgres → LLM instead of per-stage timings only.
 - **Fusion tuning:** the paraphrased evaluation shows hybrid ranking below vector-only; try weighted RRF or a reranker and keep the change only if both datasets improve.
 - **Online evaluation:** sample production answers for LLM-judge scoring; track refusal and citation rates over time.

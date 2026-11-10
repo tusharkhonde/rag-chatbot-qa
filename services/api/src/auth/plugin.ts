@@ -6,6 +6,8 @@ declare module 'fastify' {
     /** Internal id (clients.id) of the authenticated tenant. Every data access is scoped by it. */
     clientId: string;
     scopes: Scope[];
+    /** The person a delegated (authorization code) token acts for; undefined for machine clients. */
+    userId?: string;
   }
   interface FastifyContextConfig {
     /** Scope a route requires; enforced by requireScope. */
@@ -35,6 +37,7 @@ export function authenticate(
       const principal = await verify(match[1]!);
       req.clientId = principal.clientId;
       req.scopes = principal.scopes;
+      req.userId = principal.userId;
     } catch (err) {
       if (!(err instanceof InvalidTokenError)) throw err;
       req.log.info({ reason: err.message }, 'rejected access token');

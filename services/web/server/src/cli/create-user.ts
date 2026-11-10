@@ -4,6 +4,7 @@
  */
 import { parseArgs } from 'node:util';
 import pg from 'pg';
+import { loadConfig } from '../config.js';
 import { createUserStore, generatePassword, type Role } from '../users.js';
 
 const { values } = parseArgs({
@@ -20,6 +21,14 @@ if (!values.email || !values.name || !['admin', 'user'].includes(values.role!)) 
 }
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 const password = values.password ?? generatePassword();
-const user = await createUserStore(pool).create({ email: values.email, name: values.name, password, role: values.role as Role });
+// Inside the web container the BFF's credentials are available: link the user to its tenant now.
+// Elsewhere the user is linked the next time the web app starts.
+let tenantClientId: string | undefined;
+try {
+  tenantClientId = loadConfig().ragClientId;
+} catch {
+  tenantClientId = undefined;
+}
+const user = await createUserStore(pool, { tenantClientId }).create({ email: values.email, name: values.name, password, role: values.role as Role });
 await pool.end();
 console.log(`created ${user.role} ${user.email}${values.password ? '' : `\npassword: ${password}`}`);

@@ -288,4 +288,7 @@ services/web/
   password); no MFA. Next steps: change-password, then TOTP or WebAuthn passkeys.
 - **Ingestion progress is polled** (every 2 s while a document is processing), not pushed. A
   server-sent progress stream (chunks embedded so far) would be the next step for very large PDFs.
-- **One organization per deployment** (see Tenancy).
+- **One organization per deployment** (see Tenancy). On startup the web app links its users to
+  the tenant of its own API client (`web_users.tenant_id`), so when a person authorizes another
+  application through the API's authorization code flow (ADR 0010), that application sees the
+  same collections they see here.

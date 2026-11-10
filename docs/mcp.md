@@ -106,7 +106,9 @@ Discovery, as a client performs it ([`src/cli/mcp-smoke.ts`](../services/api/src
 2. GET /.well-known/oauth-protected-resource/mcp                       (RFC 9728)
    ← { "resource": "http://localhost:3000/mcp", "authorization_servers": ["http://localhost:3000"], ... }
 3. GET /.well-known/oauth-authorization-server                         (RFC 8414)
-   ← { "token_endpoint": ".../oauth/token", "jwks_uri": "...", "grant_types_supported": ["client_credentials"], ... }
+   ← { "token_endpoint": ".../oauth/token", "authorization_endpoint": ".../oauth/authorize",
+       "grant_types_supported": ["client_credentials", "authorization_code", "refresh_token"],
+       "code_challenge_methods_supported": ["S256"], ... }
 4. POST /oauth/token  grant_type=client_credentials&scope=query&resource=http://localhost:3000/mcp   (RFC 8707)
    ← { "access_token": "<JWT with aud = http://localhost:3000/mcp>", ... }
 5. POST /mcp  Authorization: Bearer <token>   → initialize, tools/list, tools/call ...
@@ -121,10 +123,16 @@ Discovery, as a client performs it ([`src/cli/mcp-smoke.ts`](../services/api/src
 - The HTTP endpoint never calls another service with the caller's token: it runs in-process.
 - The stdio server authenticates to the REST API with **its own** credentials and requests only `scope=query` (least privilege).
 
-**Limitation, stated honestly:** interactive hosts that implement MCP OAuth for *users* (Claude Desktop, Claude Code's remote-server login) use the authorization-code flow with PKCE, often with dynamic client registration. This authorization server supports only client credentials (machine to machine), so:
-- For interactive hosts on this machine, use **stdio**.
-- The remote endpoint is for services and agents that hold client credentials (or a token passed as a header).
-- Adding authorization code + PKCE is the path to letting users connect remotely.
+**Services or people.** A token for `/mcp` can come from either grant:
+- **Client credentials** (step 4 above): a service or agent acting as itself.
+- **Authorization code + PKCE** ([ADR 0010](adr/0010-authorization-code-pkce.md)): an application
+  acting for a person. The person signs in with their web-app account at `/oauth/authorize` and
+  approves. With `resource=http://localhost:3000/mcp` the token's audience is the MCP endpoint, and
+  its scopes are limited by the person's role. Interactive MCP hosts use this flow for users.
+
+What's still missing for hosts that register themselves is **dynamic client registration**
+(RFC 7591). Until then, each application is registered by an operator with
+`create-client --public --redirect-uri …`. `scripts/pkce-demo.mjs` shows the complete flow.
 
 ## Connecting clients
 

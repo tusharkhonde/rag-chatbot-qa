@@ -37,6 +37,7 @@ export function fakeUsers(): UserStore & { all: (User & { password: string })[] 
       const u = all.find((x) => x.id === id);
       if (u) u.password = password;
     },
+    linkTenant: async () => 0,
     setDisabled: async (id, disabled) => {
       const u = all.find((x) => x.id === id);
       if (!u) return null;

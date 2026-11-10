@@ -31,6 +31,7 @@ it has no concept of human users, passwords or browser sessions.
   - Standards-based, and interactive MCP clients could reuse the same login.
   - But tokens live in the browser, and it needs a full authorization server with a login UI
     and consent: about twice the auth surface.
-  - A good follow-up to compare.
+  - The API now has that authorization server for *other* applications acting for a person
+    ([ADR 0010](0010-authorization-code-pkce.md)). The web app itself keeps the BFF: no tokens in the browser.
 - **JWT in localStorage:** readable by any injected script, and can't be revoked before expiry.
 - **Stateless signed-cookie sessions:** no Redis needed, but no server-side revocation.

@@ -4,6 +4,9 @@ import rateLimit from '@fastify/rate-limit';
 import { randomUUID } from 'node:crypto';
 import Fastify, { type FastifyInstance } from 'fastify';
 import type { ClientStore } from './auth/clients.js';
+import type { AuthKV } from './auth/kv.js';
+import type { RefreshTokenStore } from './auth/refreshTokens.js';
+import type { UserDirectory } from './auth/users.js';
 import { authenticate, requireScope } from './auth/plugin.js';
 import type { TokenService } from './auth/tokens.js';
 import type { Config } from './config.js';
@@ -14,6 +17,7 @@ import type { MlClient } from './ml/client.js';
 import type { Metrics } from './observability/metrics.js';
 import type { ReadinessCheck } from './observability/readiness.js';
 import type { Retriever } from './retrieval/retriever.js';
+import { authorizeRoutes } from './routes/authorize.js';
 import { collectionRoutes } from './routes/collections.js';
 import { mcpRoutes } from './routes/mcp.js';
 import { oauthRoutes } from './routes/oauth.js';
@@ -31,6 +35,10 @@ export interface AppDeps {
   condenser?: Condenser;
   clients: ClientStore;
   tokens: TokenService;
+  /** Authorization code + PKCE (people delegating access). Omit all three for client_credentials only. */
+  users?: UserDirectory;
+  authKv?: AuthKV;
+  refreshTokens?: RefreshTokenStore;
   metrics: Metrics;
   readinessChecks: Record<string, ReadinessCheck>;
 }
@@ -70,14 +78,28 @@ export function buildApp(deps: AppDeps): FastifyInstance {
 
   app.register(opsRoutes, { metrics, readinessChecks: deps.readinessChecks, metricsToken: config.METRICS_TOKEN });
 
-  // Public: token issuance and the JWKS.
+  // Public: token issuance, the authorization endpoint (sign-in + consent) and the JWKS.
   app.register(oauthRoutes, {
     clients,
     tokens,
     issuer: config.JWT_ISSUER,
     baseUrl: config.PUBLIC_BASE_URL,
     mcpResource: config.MCP_RESOURCE,
+    users: deps.users,
+    kv: deps.authKv,
+    refreshTokens: deps.refreshTokens,
+    refreshTokenTtlSeconds: config.REFRESH_TOKEN_TTL_SECONDS,
   });
+  if (deps.users && deps.authKv && deps.refreshTokens) {
+    app.register(authorizeRoutes, {
+      clients,
+      users: deps.users,
+      kv: deps.authKv,
+      issuer: config.JWT_ISSUER,
+      baseUrl: config.PUBLIC_BASE_URL,
+      mcpResource: config.MCP_RESOURCE,
+    });
+  }
 
   // Everything else requires a valid access token and is scoped to its tenant.
   app.register(async (protectedApp) => {

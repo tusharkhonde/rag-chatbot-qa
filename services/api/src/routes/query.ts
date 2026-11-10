@@ -25,11 +25,11 @@ interface QueryBody {
 export const queryRoutes: FastifyPluginAsync<Deps> = async (app, { repo, answerer, defaults, metrics }) => {
   // One structured line per answered question: everything needed to debug quality or latency
   // (stage timings, token usage, cache, retrieval confidence) without logging the question text.
-  function record(log: typeof app.log, collectionId: string, result: AnswerResult, streamed: boolean) {
+  function record(log: typeof app.log, collectionId: string, result: AnswerResult, streamed: boolean, userId?: string) {
     metrics.observeAnswer(result);
     log.info(
       {
-        event: 'rag_query', collectionId, streamed, cached: result.cached, refused: result.refused,
+        event: 'rag_query', collectionId, userId, streamed, cached: result.cached, refused: result.refused,
         mode: result.retrieval.mode, condensed: result.condensedQuestion !== null,
         sources: result.sources.length, citations: result.citations.length,
         invalidCitations: result.invalidCitations, topVectorScore: result.retrieval.topVectorScore,
@@ -79,7 +79,7 @@ export const queryRoutes: FastifyPluginAsync<Deps> = async (app, { repo, answere
       if (!req.body.stream) {
         try {
           const result = await answerer.answer(request);
-          record(req.log, collection.id, result, false);
+          record(req.log, collection.id, result, false, req.userId);
           return result;
         } catch (err) {
           if (err instanceof EmbeddingModelMismatchError) return reply.code(409).send({ error: err.message });
@@ -114,7 +114,7 @@ export const queryRoutes: FastifyPluginAsync<Deps> = async (app, { repo, answere
           else if (event.type === 'sources') send('sources', { sources: event.sources });
           else if (event.type === 'condensed') send('condensed', { question: event.question });
           else {
-            record(req.log, collection.id, event.result, true);
+            record(req.log, collection.id, event.result, true, req.userId);
             send('done', event.result);
           }
         }

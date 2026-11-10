@@ -9,7 +9,11 @@ import { createUserStore, generatePassword } from './users.js';
 const config = loadConfig();
 const pool = new pg.Pool({ connectionString: config.DATABASE_URL, max: 5 });
 const redis = new Redis(config.REDIS_URL, { maxRetriesPerRequest: 1 });
-const users = createUserStore(pool);
+const users = createUserStore(pool, { tenantClientId: config.ragClientId });
+// People act within the web app's tenant: link any user created before tenants were recorded
+// (or by a CLI without credentials), so the API's authorization endpoint can issue them tokens.
+const linked = await users.linkTenant(config.ragClientId);
+if (linked) console.log(`Linked ${linked} user(s) to this web app's tenant`);
 
 // First run: create an admin so someone can sign in. A generated password is printed once to the
 // logs (docker compose logs web); it never has to live in a config file.

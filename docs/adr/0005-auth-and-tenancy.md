@@ -30,4 +30,5 @@ its own collections.
 - **Opaque tokens + introspection:** instant revocation, but a lookup on every request.
 - **API keys sent on every request:** simpler, but the long-lived secret travels constantly
   and can't carry scopes or expiry.
-- **Authorization code + PKCE:** for user-facing apps with a browser; no user here.
+- **Authorization code + PKCE:** for user-facing apps with a browser; there was no user when this
+  was decided. Added later for people delegating access: see [ADR 0010](0010-authorization-code-pkce.md).

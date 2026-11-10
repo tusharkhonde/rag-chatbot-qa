@@ -33,6 +33,9 @@ const Env = z.object({
   // Short-lived bearer tokens: a leaked token is useful for minutes, and "revocation" is mostly
   // just waiting for expiry (no per-request DB lookup needed to validate a JWT).
   ACCESS_TOKEN_TTL_SECONDS: z.coerce.number().int().min(60).max(3600).default(900),
+  // Authorization code flow: how long a person's sign-in lasts in a client. Absolute: rotating
+  // refresh tokens never extends it.
+  REFRESH_TOKEN_TTL_SECONDS: z.coerce.number().int().min(300).default(30 * 24 * 3600),
   JWT_KEYS_DIR: z.string().default(new URL('../.keys', import.meta.url).pathname),
   // A retrieval "hits" when its best cosine similarity reaches this. Calibrate from the
   // rag_retrieval_top_vector_score histogram / eval report (answerable vs unanswerable questions).

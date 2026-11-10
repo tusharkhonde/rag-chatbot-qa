@@ -42,3 +42,26 @@ describe('user store (Postgres)', () => {
     await expect(users.setPassword(user.id, 'short')).rejects.toBeInstanceOf(WeakPasswordError);
   });
 });
+
+describe('tenant linking (authorization code flow)', () => {
+  it('links new users to the tenant of the given API client, and backfills unlinked ones', async () => {
+    const clientId = `it-web-${Date.now()}`;
+    const { rows: [client] } = await pool.query(`INSERT INTO clients (client_id, secret_hash, name) VALUES ($1, 'x', 'web it') RETURNING id`, [clientId]);
+    const linkedEmail = `linked-${Date.now()}@example.com`;
+    const orphanEmail = `orphan-${Date.now()}@example.com`;
+    try {
+      const linked = await createUserStore(pool, { tenantClientId: clientId }).create({ email: linkedEmail, name: 'L', password: 'a long enough password', role: 'user' });
+      const orphan = await users.create({ email: orphanEmail, name: 'O', password: 'a long enough password', role: 'user' });
+      const tenantOf = async (id: string) => (await pool.query('SELECT tenant_id FROM web_users WHERE id = $1', [id])).rows[0].tenant_id;
+      expect(await tenantOf(linked.id)).toBe(client.id);
+      expect(await tenantOf(orphan.id)).toBeNull();
+
+      expect(await users.linkTenant(clientId)).toBeGreaterThanOrEqual(1);
+      expect(await tenantOf(orphan.id)).toBe(client.id);
+      expect(await users.linkTenant('no-such-client')).toBe(0);
+    } finally {
+      await pool.query('DELETE FROM web_users WHERE email = ANY($1)', [[linkedEmail, orphanEmail]]);
+      await pool.query('DELETE FROM clients WHERE id = $1', [client.id]);
+    }
+  });
+});

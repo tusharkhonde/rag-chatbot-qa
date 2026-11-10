@@ -1,5 +1,8 @@
 import { buildApp } from './app.js';
 import { createClientStore } from './auth/clients.js';
+import { redisAuthKV } from './auth/kv.js';
+import { createRefreshTokenStore } from './auth/refreshTokens.js';
+import { createUserDirectory } from './auth/users.js';
 import { loadSigningKey } from './auth/keys.js';
 import { createTokenService } from './auth/tokens.js';
 import { createRedis, failSafe, redisCache } from './cache/cache.js';
@@ -74,6 +77,9 @@ const app = buildApp({
   condenser,
   clients: createClientStore(pool),
   tokens,
+  users: createUserDirectory(pool),
+  authKv: redisAuthKV(redis),
+  refreshTokens: createRefreshTokenStore(pool),
   metrics: createMetrics({ hitThreshold: config.RETRIEVAL_HIT_THRESHOLD }),
   readinessChecks,
 });

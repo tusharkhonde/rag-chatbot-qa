@@ -43,11 +43,18 @@ export interface UserStore {
   findByEmail(email: string): Promise<User | null>;
   /** Replace a user's password (same policy and hashing as create). */
   setPassword(id: string, password: string): Promise<void>;
+  /**
+   * Link users without an organization to the tenant of the given RAG API client (the BFF's own).
+   * The API's authorization endpoint issues tokens for a user's tenant, so a person who approves
+   * an application sees the same collections as in the web app. Returns how many were linked.
+   */
+  linkTenant(ragClientId: string): Promise<number>;
 }
 
 const COLUMNS = `id, email, name, role, disabled, created_at AS "createdAt", last_login_at AS "lastLoginAt"`;
 
-export function createUserStore(pool: pg.Pool): UserStore {
+/** tenantClientId: the BFF's RAG API client_id; new users are linked to its tenant. */
+export function createUserStore(pool: pg.Pool, opts: { tenantClientId?: string } = {}): UserStore {
   // Verified against for unknown emails so "no such user" and "wrong password" take equal time.
   const dummyHash = hash(randomBytes(32).toString('base64url'), ARGON2);
 
@@ -61,8 +68,9 @@ export function createUserStore(pool: pg.Pool): UserStore {
       checkPassword(password);
       try {
         const { rows } = await pool.query<User>(
-          `INSERT INTO web_users (email, name, password_hash, role) VALUES ($1, $2, $3, $4) RETURNING ${COLUMNS}`,
-          [normalizeEmail(email), name.trim(), await hash(password, ARGON2), role],
+          `INSERT INTO web_users (email, name, password_hash, role, tenant_id)
+           VALUES ($1, $2, $3, $4, (SELECT id FROM clients WHERE client_id = $5)) RETURNING ${COLUMNS}`,
+          [normalizeEmail(email), name.trim(), await hash(password, ARGON2), role, opts.tenantClientId ?? null],
         );
         return rows[0]!;
       } catch (err) {
@@ -102,6 +110,15 @@ export function createUserStore(pool: pg.Pool): UserStore {
     async setPassword(id, password) {
       checkPassword(password);
       await pool.query('UPDATE web_users SET password_hash = $2 WHERE id = $1', [id, await hash(password, ARGON2)]);
+    },
+
+    async linkTenant(ragClientId) {
+      const { rowCount } = await pool.query(
+        `UPDATE web_users SET tenant_id = (SELECT id FROM clients WHERE client_id = $1)
+          WHERE tenant_id IS NULL AND EXISTS (SELECT 1 FROM clients WHERE client_id = $1)`,
+        [ragClientId],
+      );
+      return rowCount ?? 0;
     },
 
     async setDisabled(id, disabled) {
